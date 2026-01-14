@@ -1,7 +1,7 @@
 import os
-import jax
+import torch
 import numpy as np
-import jax.numpy as jnp
+
 
 from serl_robot_infra.robot_env.envs.wrappers import (
     Quat2EulerWrapper,
@@ -88,7 +88,7 @@ class TrainConfig(DefaultTrainingConfig):
     encoder_type = "resnet-pretrained"
     setup_mode = "single-arm-learned-gripper"
 
-    def get_environment(self, fake_env=False, save_video=False, classifier=False):
+    def get_environment(self, fake_env=False, save_video=False, classifier=False, device = "cuda"):
         env = PickEnv(
             fake_env=fake_env, save_video=save_video, config=EnvConfig()
         )
@@ -100,14 +100,14 @@ class TrainConfig(DefaultTrainingConfig):
         env = ChunkingWrapper(env, obs_horizon=1, act_exec_horizon=None)
         if classifier:
             classifier = load_classifier_func(
-                key=jax.random.PRNGKey(0),
                 sample=env.observation_space.sample(),
                 image_keys=self.image_keys,
                 checkpoint_path=os.path.abspath("classifier_ckpt/"),
+                device=device,
             )
 
             def reward_func(obs):
-                sigmoid = lambda x: 1 / (1 + jnp.exp(-x))
+                sigmoid = lambda x: 1 / (1 + torch.exp(-x))
                 return int(sigmoid(classifier(obs)) > 0.7 and obs["state"][0, 0] > 0.4)
 
             env = MultiCameraBinaryRewardClassifierWrapper(env, reward_func)
