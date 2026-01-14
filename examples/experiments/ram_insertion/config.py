@@ -3,14 +3,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from franka_env.envs.wrappers import (
+from serl_robot_infra.franka_env.envs.wrappers import (
     Quat2EulerWrapper,
     SpacemouseIntervention,
     MultiCameraBinaryRewardClassifierWrapper,
     GripperCloseEnv
 )
-from franka_env.envs.relative_env import RelativeFrame
-from franka_env.envs.franka_env import DefaultEnvConfig
+from serl_robot_infra.franka_env.envs.relative_env import RelativeFrame
+from serl_robot_infra.franka_env.envs.franka_env import DefaultEnvConfig
 from serl_launcher.wrappers.serl_obs_wrappers import SERLObsWrapper
 from serl_launcher.wrappers.chunking import ChunkingWrapper
 from serl_launcher.networks.reward_classifier import load_classifier_func

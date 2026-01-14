@@ -4,13 +4,61 @@ import gymnasium as gym
 import numpy as np
 from gymnasium.spaces import Box
 import copy
-from franka_env.spacemouse.spacemouse_expert import SpaceMouseExpert
+from serl_robot_infra.cowa_env.spacemouse.spacemouse_expert import SpaceMouseExpert
 import requests
 from scipy.spatial.transform import Rotation as R
-from franka_env.envs.franka_env import FrankaEnv
+from serl_robot_infra.cowa_env.envs.cowa_arm_env import cowa_env
 from typing import List
+from cowa_env.utils.arm_controller import ArmController
+from cowa_env.utils.cr_node_util import ThreadSafeStack, ArmStateDecoder, RawImageDecoder
 
 sigmoid = lambda x: 1 / (1 + np.exp(-x))
+
+class HilserlArmControllerWrapper(ArmController):
+    def __init__(self, node, dof_num, control_mode = "vel", receive_interval=0.002, publish_interval=0.01, timeout_interval=0.2):
+        super().__init__(node, dof_num, control_mode, receive_interval, publish_interval, timeout_interval)
+        self.expert_command_stack = ThreadSafeStack(max_size=1)
+        expert_command_decoder = ArmStateDecoder(stack=self.expert_command_stack, freq=100)
+        self.expert_command_reader = node.CreateReader("/RL/base_info/leader_arm", expert_command_decoder)
+        self.expert_state_stack = ThreadSafeStack(max_size=1)
+        expert_state_decoder = ArmStateDecoder(stack=self.expert_state_stack, freq=100)
+        self.expert_state_reader = node.CreateReader("/motor_info/arm", expert_state_decoder)
+        self.expert_action = None
+        self.expert_state = None
+
+    def _update_expert_action(self):
+        while True:
+            flag, expert_action = self.expert_command_stack.pop()
+            while not flag:
+                time.sleep(0.01)
+                flag, expert_action = self.expert_command_stack.pop()
+            self.set_expert_action(expert_action)
+            time.sleep(1/30)
+    
+    def set_expert_action(self, expert_action):
+        with self.arm_state_lock:
+            self.expert_action[:3], self.expert_action[3:7] = self.get_ee_pos_by_q(expert_action[1:])
+            self.expert_action[7] = expert_action[0]
+
+    def get_expert_action(self):
+        return self.expert_action
+
+    def _update_expert_state(self):
+        while True:
+            flag, expert_state = self.expert_state_stack.pop()
+            while not flag:
+                time.sleep(0.01)
+                flag, expert_state = self.expert_state_stack.pop()
+            self.set_expert_action(expert_state)
+            time.sleep(1/30)
+    
+    def set_expert_state(self, expert_state):
+        with self.arm_state_lock:
+            self.expert_state = expert_state
+
+    def get_expert_state(self):
+        return self.expert_state
+
 
 class HumanClassifierWrapper(gym.Wrapper):
     def __init__(self, env):
@@ -223,30 +271,10 @@ class SpacemouseIntervention(gym.ActionWrapper):
         Output:
         - action: spacemouse action if nonezero; else, policy action
         """
-        expert_a, buttons = self.expert.get_action()
-        self.left, self.right = tuple(buttons)
-        intervened = False
-        
-        if np.linalg.norm(expert_a) > 0.001:
-            intervened = True
+        flag = self.env.arm_controller.get_expert_state()
+        expert_a = self.env.arm_controller.get_expert_action()
 
-        if self.gripper_enabled:
-            if self.left:  # close gripper
-                gripper_action = np.random.uniform(-1, -0.9, size=(1,))
-                intervened = True
-            elif self.right:  # open gripper
-                gripper_action = np.random.uniform(0.9, 1, size=(1,))
-                intervened = True
-            else:
-                gripper_action = np.zeros((1,))
-            expert_a = np.concatenate((expert_a, gripper_action), axis=0)
-
-        if self.action_indices is not None:
-            filtered_expert_a = np.zeros_like(expert_a)
-            filtered_expert_a[self.action_indices] = expert_a[self.action_indices]
-            expert_a = filtered_expert_a
-
-        if intervened:
+        if flag:
             return expert_a, True
 
         return action, False
@@ -258,8 +286,7 @@ class SpacemouseIntervention(gym.ActionWrapper):
         obs, rew, done, truncated, info = self.env.step(new_action)
         if replaced:
             info["intervene_action"] = new_action
-        info["left"] = self.left
-        info["right"] = self.right
+
         return obs, rew, done, truncated, info
 
 class DualSpacemouseIntervention(gym.ActionWrapper):

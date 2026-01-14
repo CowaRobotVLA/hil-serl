@@ -1,3 +1,8 @@
+import sys
+for p in sys.path:
+    if "crpilot" in p:
+        sys.path.remove(p)
+print(sys.path)
 import glob
 import os
 import pickle as pkl
@@ -19,12 +24,13 @@ from experiments.mappings import CONFIG_MAPPING
 
 
 FLAGS = flags.FLAGS
-flags.DEFINE_string("exp_name", None, "Name of experiment corresponding to folder.")
+flags.DEFINE_string("exp_name", "cowa_pick", "Name of experiment corresponding to folder.")
 flags.DEFINE_integer("num_epochs", 150, "Number of training epochs.")
 flags.DEFINE_integer("batch_size", 256, "Batch size.")
 
 
 def main(_):
+    # print(FLAGS.exp_name)
     assert FLAGS.exp_name in CONFIG_MAPPING, 'Experiment folder not found.'
     config = CONFIG_MAPPING[FLAGS.exp_name]()
     env = config.get_environment(fake_env=True, save_video=False, classifier=False)

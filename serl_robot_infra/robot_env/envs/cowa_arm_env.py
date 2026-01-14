@@ -13,10 +13,13 @@ from datetime import datetime
 from collections import OrderedDict
 from typing import Dict
 
-from franka_env.camera.video_capture import VideoCapture
-from franka_env.camera.rs_capture import RSCapture
-from franka_env.utils.rotations import euler_2_quat, quat_2_euler
-
+# from franka_env.camera.video_capture import VideoCapture
+# from franka_env.camera.rs_capture import RSCapture
+from serl_robot_infra.cowa_env.utils.rotations import euler_2_quat, quat_2_euler
+import pycrmw
+import sys,os
+from serl_robot_infra.cowa_env.utils.cr_node_util import ThreadSafeStack, RawImageDecoder
+from serl_robot_infra.cowa_env.envs.wrappers import HilserlArmControllerWrapper
 
 class ImageDisplayer(threading.Thread):
     def __init__(self, queue, name):
@@ -46,10 +49,6 @@ class DefaultEnvConfig:
     """Default configuration for FrankaEnv. Fill in the values below."""
 
     SERVER_URL: str = "http://127.0.0.1:5000/"
-    REALSENSE_CAMERAS: Dict = {
-        "wrist_1": "130322274175",
-        "wrist_2": "127122270572",
-    }
     IMAGE_CROP: dict[str, callable] = {}
     TARGET_POSE: np.ndarray = np.zeros((6,))
     GRASP_POSE: np.ndarray = np.zeros((6,))
@@ -78,7 +77,7 @@ class DefaultEnvConfig:
 ##############################################################################
 
 
-class FrankaEnv(gym.Env):
+class cowa_env(gym.Env):
     def __init__(
         self,
         hz=10,
@@ -87,6 +86,11 @@ class FrankaEnv(gym.Env):
         config: DefaultEnvConfig = None,
         set_load=False,
     ):
+        pycrmw.Init(sys.argv)
+        if not pycrmw.IsOK():
+            os._exit(0)
+        self.node = pycrmw.Node("test")
+        self.arm_contoller = HilserlArmControllerWrapper(self.node, 7)
         self.action_scale = config.ACTION_SCALE
         self._TARGET_POSE = config.TARGET_POSE
         self._RESET_POSE = config.RESET_POSE
@@ -128,8 +132,8 @@ class FrankaEnv(gym.Env):
         )
         # Action/Observation Space
         self.action_space = gym.spaces.Box(
-            np.ones((7,), dtype=np.float32) * -1,
-            np.ones((7,), dtype=np.float32),
+            np.ones((8,), dtype=np.float32) * -1,
+            np.ones((8,), dtype=np.float32),
         )
 
         self.observation_space = gym.spaces.Dict(
@@ -141,13 +145,13 @@ class FrankaEnv(gym.Env):
                         ),  # xyz + quat
                         "tcp_vel": gym.spaces.Box(-np.inf, np.inf, shape=(6,)),
                         "gripper_pose": gym.spaces.Box(-1, 1, shape=(1,)),
-                        "tcp_force": gym.spaces.Box(-np.inf, np.inf, shape=(3,)),
-                        "tcp_torque": gym.spaces.Box(-np.inf, np.inf, shape=(3,)),
+                        # "tcp_force": gym.spaces.Box(-np.inf, np.inf, shape=(3,)),
+                        # "tcp_torque": gym.spaces.Box(-np.inf, np.inf, shape=(3,)),
                     }
                 ),
                 "images": gym.spaces.Dict(
-                    {key: gym.spaces.Box(0, 255, shape=(128, 128, 3), dtype=np.uint8) 
-                                for key in config.REALSENSE_CAMERAS}
+                    {cam_name: gym.spaces.Box(0, 255, shape=(128, 128, 3), dtype=np.uint8) 
+                                for cam_name in config.IMAGE_CROP.keys()}
                 ),
             }
         )
@@ -157,7 +161,8 @@ class FrankaEnv(gym.Env):
             return
 
         self.cap = None
-        self.init_cameras(config.REALSENSE_CAMERAS)
+        # cameras = ["panorama/1", "panorama/2", "panorama/3", "left/1", "right/1"]
+        self.init_cameras()
         if self.display_image:
             self.img_queue = queue.Queue()
             self.displayer = ImageDisplayer(self.img_queue, self.url)
@@ -217,14 +222,12 @@ class FrankaEnv(gym.Env):
 
         # GET ORIENTATION FROM ACTION
         self.nextpos[3:] = (
-            Rotation.from_rotvec(action[3:6] * self.action_scale[1])
+            Rotation.quat(action[3:7] * self.action_scale[1])
             * Rotation.from_quat(self.currpos[3:])
         ).as_quat()
 
-        gripper_action = action[6] * self.action_scale[2]
-
-        self._send_gripper_command(gripper_action)
-        self._send_pos_command(self.clip_safety_box(self.nextpos))
+        gripper_action = (action[7] + 1)* self.action_scale[2]
+        self._send_command(self.nextpos, gripper_action)
 
         self.curr_path_length += 1
         dt = time.time() - start_time
@@ -252,35 +255,60 @@ class FrankaEnv(gym.Env):
             return False
 
     def get_im(self) -> Dict[str, np.ndarray]:
-        """Get images from the realsense cameras."""
+        """Get images from the camera stacks (adapted for ThreadSafeStack)."""
         images = {}
         display_images = {}
-        full_res_images = {}  # New dictionary to store full resolution cropped images
-        for key, cap in self.cap.items():
+        full_res_images = {}
+        
+        # 遍历配置中的每个相机，这与 init_cameras 的逻辑保持一致
+        for cam_name, crop_func in self.config.IMAGE_CROP.items():
+            # 1. 获取对应的 stack key (去除首尾斜杠，和你 init 中一致)
+            key_name = cam_name.strip("/")
+            
+            # 确保 stack 存在
+            if key_name not in self.camera_stacks:
+                continue
+                
+            stack = self.camera_stacks[key_name]
+            
+            # 2. 从 Stack 获取图片
+            # 逻辑：pop 返回 (flag, image)，如果 flag 为 False 则循环等待
+            flag, rgb = stack.pop()
+            while not flag:
+                time.sleep(0.001) # 短暂休眠防止 CPU 空转 (Busy Waiting)
+                flag, rgb = stack.pop()
+                
+            # 3. 图片处理流程 (保留原版逻辑)
             try:
-                rgb = cap.read()
-                cropped_rgb = self.config.IMAGE_CROP[key](rgb) if key in self.config.IMAGE_CROP else rgb
-                resized = cv2.resize(
-                    cropped_rgb, self.observation_space["images"][key].shape[:2][::-1]
-                )
-                images[key] = resized[..., ::-1]
-                display_images[key] = resized
-                display_images[key + "_full"] = cropped_rgb
-                full_res_images[key] = copy.deepcopy(cropped_rgb)  # Store the full resolution cropped image
-            except queue.Empty:
-                input(
-                    f"{key} camera frozen. Check connect, then press enter to relaunch..."
-                )
-                cap.close()
-                self.init_cameras(self.config.REALSENSE_CAMERAS)
-                return self.get_im()
+                # 裁剪 (使用配置中的 crop_func)
+                cropped_rgb = crop_func(rgb) if crop_func else rgb
+                
+                # 调整大小 (Resize)
+                # 注意：这里假设 observation_space 的 key 与 cam_name (原始名) 或 key_name (处理名) 对应
+                # 为了稳健，优先尝试用 key_name，如果原版 obs space 有斜杠，可能需要调整这里
+                target_shape = self.observation_space["images"][key_name].shape[:2][::-1]
+                resized = cv2.resize(cropped_rgb, target_shape)
+                
+                # 格式转换与存储
+                images[key_name] = resized[..., ::-1] # BGR to RGB
+                display_images[key_name] = resized
+                display_images[key_name + "_full"] = cropped_rgb
+                full_res_images[key_name] = copy.deepcopy(cropped_rgb)
 
-        # Store full resolution cropped images separately
+            except Exception as e:
+                print(f"[Error] Processing image for {key_name}: {e}")
+                # 如果处理出错，可以选择返回旧数据或者抛出异常
+                # 这里简单演示跳过，或者你可以根据需要添加重试逻辑
+                continue
+
+        # 4. 保存视频帧 (保留原版逻辑)
         if self.save_video:
             self.recording_frames.append(full_res_images)
 
+        # 5. 显示图片 (保留原版逻辑)
         if self.display_image:
             self.img_queue.put(display_images)
+            
         return images
 
     def interpolate_move(self, goal: np.ndarray, timeout: float):
@@ -390,17 +418,38 @@ class FrankaEnv(gym.Env):
         except Exception as e:
             print(f"Failed to save video: {e}")
 
-    def init_cameras(self, name_serial_dict=None):
+    def init_cameras(self):
         """Init both wrist cameras."""
-        if self.cap is not None:  # close cameras if they are already open
-            self.close_cameras()
+        # 假设这是你的 camera 名字列表
+        # 1. 初始化容器字典
+        # 使用字典存储，方便后续通过名字访问，例如 self.camera_stacks['panorama/3']
+        self.camera_stacks = {}
+        self.camera_decoders = {}
+        self.camera_readers = {}
 
-        self.cap = OrderedDict()
-        for cam_name, kwargs in name_serial_dict.items():
-            cap = VideoCapture(
-                RSCapture(name=cam_name, **kwargs)
-            )
-            self.cap[cam_name] = cap
+        for cam_name, _ in self.config.IMAGE_CROP.items():
+            # 清理名字，作为字典的 Key (去除首尾斜杠，防止 key 混乱)
+            # 例如 "/panorama/3" -> "panorama/3"
+            key_name = cam_name.strip("/")
+
+            # --- 1. 创建独立的 Stack ---
+            stack = ThreadSafeStack(10)
+            self.camera_stacks[key_name] = stack
+
+            # --- 2. 创建独立的 Decoder (绑定到上面的 stack) ---
+            decoder = RawImageDecoder(stack, freq=10)
+            self.camera_decoders[key_name] = decoder
+
+            # --- 3. 拼接 Topic 路径 ---
+            # 你的范例路径是: /camera/panorama/3/image_raw
+            # 逻辑是: /camera/ + {名字} + /image_raw
+            topic_path = f"/camera/{key_name}/image_raw"
+
+            # --- 4. 创建 Reader ---
+            reader = self.node.CreateReader(topic_path, decoder)
+            self.camera_readers[key_name] = reader
+
+            print(f"[Info] Initialized Camera: {key_name} | Topic: {topic_path}")
 
     def close_cameras(self):
         """Close both wrist cameras."""
@@ -414,45 +463,25 @@ class FrankaEnv(gym.Env):
         """Internal function to recover the robot from error state."""
         requests.post(self.url + "clearerr")
 
-    def _send_pos_command(self, pos: np.ndarray):
-        """Internal function to send position command to the robot."""
-        self._recover()
-        arr = np.array(pos).astype(np.float32)
-        data = {"arr": arr.tolist()}
-        requests.post(self.url + "pose", json=data)
-
-    def _send_gripper_command(self, pos: float, mode="binary"):
-        """Internal function to send gripper command to the robot."""
-        if mode == "binary":
-            if (pos <= -0.5) and (self.curr_gripper_pos > 0.85) and (time.time() - self.last_gripper_act > self.gripper_sleep):  # close gripper
-                requests.post(self.url + "close_gripper")
-                self.last_gripper_act = time.time()
-                time.sleep(self.gripper_sleep)
-            elif (pos >= 0.5) and (self.curr_gripper_pos < 0.85) and (time.time() - self.last_gripper_act > self.gripper_sleep):  # open gripper
-                requests.post(self.url + "open_gripper")
-                self.last_gripper_act = time.time()
-                time.sleep(self.gripper_sleep)
-            else: 
-                return
-        elif mode == "continuous":
-            raise NotImplementedError("Continuous gripper control is optional")
+    def _send_command(self, eepos, grip_pos):
+        q = self.arm_contoller.get_q_by_ee_pos(eepos[:3], eepos[3:], grip_pos)
+        self.arm_contoller.set_target(q) 
 
     def _update_currpos(self):
         """
         Internal function to get the latest state of the robot and its gripper.
         """
-        ps = requests.post(self.url + "getstate").json()
-        self.currpos = np.array(ps["pose"])
-        self.currvel = np.array(ps["vel"])
 
-        self.currforce = np.array(ps["force"])
-        self.currtorque = np.array(ps["torque"])
-        self.currjacobian = np.reshape(np.array(ps["jacobian"]), (6, 7))
-
-        self.q = np.array(ps["q"])
-        self.dq = np.array(ps["dq"])
-
-        self.curr_gripper_pos = np.array(ps["gripper_pos"])
+        ps = self.arm_stack.peek()
+        self.currpos = self.arm_contoller.get_eepos_state()
+        self.q, self.dq= self.arm_contoller.get_arm_state()
+        # self.currforce = np.array(ps["force"])
+        # self.currtorque = np.array(ps["torque"])
+        # self.currjacobian = np.reshape(np.array(ps["jacobian"]), (6, 7))
+        self.curr_gripper_pos = self.q[0]
+        self.q = self.q[1:]
+        self.dq = self.currvel[1:]
+        # self.currtorque = self.currtorque[1:]
 
     def update_currpos(self):
         """
@@ -475,10 +504,11 @@ class FrankaEnv(gym.Env):
         images = self.get_im()
         state_observation = {
             "tcp_pose": self.currpos,
-            "tcp_vel": self.currvel,
+            "q": self.q,
+            "dq": self.dq,
             "gripper_pose": self.curr_gripper_pos,
-            "tcp_force": self.currforce,
-            "tcp_torque": self.currtorque,
+            # "tcp_force": self.currforce,
+            # "tcp_torque": self.currtorque,
         }
         return copy.deepcopy(dict(images=images, state=state_observation))
 
