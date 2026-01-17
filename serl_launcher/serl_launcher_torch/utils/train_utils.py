@@ -6,8 +6,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 import imageio
-import jax
-import jax.numpy as jnp
+import torch
 import numpy as np
 import tensorflow as tf
 import wandb
@@ -48,54 +47,48 @@ def ask_for_frame(images_dict):
     return first_success
 
 def concat_batches(offline_batch, online_batch, axis=1):
+    """Concatenate two batches along specified axis"""
     batch = defaultdict(list)
 
-    if not isinstance(offline_batch, dict):
-        offline_batch = offline_batch.unfreeze()
+    if isinstance(offline_batch, dict) and isinstance(online_batch, dict):
+        for k, v in offline_batch.items():
+            if isinstance(v, dict):
+                batch[k] = concat_batches(offline_batch[k], online_batch[k], axis=axis)
+            else:
+                if isinstance(v, torch.Tensor) and isinstance(online_batch[k], torch.Tensor):
+                    batch[k] = torch.cat((v, online_batch[k]), dim=axis)
+                elif isinstance(v, np.ndarray) and isinstance(online_batch[k], np.ndarray):
+                    batch[k] = np.concatenate((v, online_batch[k]), axis=axis)
+                else:
+                    raise TypeError(f"Unsupported type for concatenation: {type(v)} and {type(online_batch[k])}")
+    return batch
 
-    if not isinstance(online_batch, dict):
-        online_batch = online_batch.unfreeze()
-
-    for k, v in offline_batch.items():
-        if type(v) is dict:
-            batch[k] = concat_batches(offline_batch[k], online_batch[k], axis=axis)
-        else:
-            batch[k] = jnp.concatenate((offline_batch[k], online_batch[k]), axis=axis)
-
-    return frozen_dict.freeze(batch)
-
-
-def load_recorded_video(
-    video_path: str,
-):
-    with tf.io.gfile.GFile(video_path, "rb") as f:
-        video = np.array(imageio.mimread(f, "MP4")).transpose((0, 3, 1, 2))
-        assert video.shape[1] == 3, "Numpy array should be (T, C, H, W)"
-
+def load_recorded_video(video_path: str):
+    """Load and convert video for wandb logging"""
+    video = np.array(imageio.mimread(video_path, "MP4")).transpose((0, 3, 1, 2))
+    assert video.shape[1] == 3, "Numpy array should be (T, C, H, W)"
     return wandb.Video(video, fps=20)
-
 
 def _unpack(batch):
     """
     Helps to minimize CPU to GPU transfer.
-    Assuming that if next_observation is missing, it's combined with observation:
-
-    :param batch: a batch of data from the replay buffer, a dataset dict
-    :return: a batch of unpacked data, a dataset dict
+    Assuming that if next_observation is missing, it's combined with observation
     """
-
     for pixel_key in batch["observations"].keys():
         if pixel_key not in batch["next_observations"]:
-            obs_pixels = batch["observations"][pixel_key][:, :-1, ...]
-            next_obs_pixels = batch["observations"][pixel_key][:, 1:, ...]
-
-            obs = batch["observations"].copy(add_or_replace={pixel_key: obs_pixels})
-            next_obs = batch["next_observations"].copy(
-                add_or_replace={pixel_key: next_obs_pixels}
-            )
-            batch = batch.copy(
-                add_or_replace={"observations": obs, "next_observations": next_obs}
-            )
+            if isinstance(batch["observations"][pixel_key], torch.Tensor):
+                obs_pixels = batch["observations"][pixel_key][:, :-1, ...]
+                next_obs_pixels = batch["observations"][pixel_key][:, 1:, ...]
+                
+                obs = dict(batch["observations"])
+                obs[pixel_key] = obs_pixels
+                
+                next_obs = dict(batch["next_observations"])
+                next_obs[pixel_key] = next_obs_pixels
+                
+                batch = dict(batch)
+                batch["observations"] = obs
+                batch["next_observations"] = next_obs
 
     return batch
 
@@ -103,7 +96,6 @@ def _unpack(batch):
 def load_resnet10_params(agent, image_keys=("image",), public=True):
     """
     Load pretrained resnet10 params from github release to an agent.
-    :return: agent with pretrained resnet10 params
     """
     file_name = "resnet10_params.pkl"
     if not public:  # if github repo is not public, load from local file
@@ -115,6 +107,7 @@ def load_resnet10_params(agent, image_keys=("image",), public=True):
         if not os.path.exists(file_path):
             os.makedirs(file_path)
         file_path = os.path.join(file_path, file_name)
+        
         # Check if the file exists
         if os.path.exists(file_path):
             print(f"The ResNet-10 weights already exist at '{file_path}'.")
@@ -142,23 +135,69 @@ def load_resnet10_params(agent, image_keys=("image",), public=True):
         with open(file_path, "rb") as f:
             encoder_params = pkl.load(f)
 
-    param_count = sum(x.size for x in jax.tree_leaves(encoder_params))
-    print(
-        f"Loaded {param_count/1e6}M parameters from ResNet-10 pretrained on ImageNet-1K"
-    )
+    # Convert numpy arrays to torch tensors if needed
+    encoder_params = {
+        k: torch.from_numpy(v) if isinstance(v, np.ndarray) else v 
+        for k, v in encoder_params.items()
+    }
 
-    new_params = agent.state.params
+    param_count = sum(p.numel() for p in encoder_params.values() if isinstance(p, torch.Tensor))
+    print(f"Loaded {param_count/1e6}M parameters from ResNet-10 pretrained on ImageNet-1K")
 
+    # Update agent's encoder parameters
     for image_key in image_keys:
-        new_encoder_params = new_params["modules_actor"]["encoder"][
-            f"encoder_{image_key}"
-        ]
-        if "pretrained_encoder" in new_encoder_params:
-            new_encoder_params = new_encoder_params["pretrained_encoder"]
-        for k in new_encoder_params:
-            if k in encoder_params:
-                new_encoder_params[k] = encoder_params[k]
-                print(f"replaced {k} in pretrained_encoder")
+        encoder_name = f"encoder_{image_key}"
+        if encoder_name in agent.actor.encoder.state_dict():
+            encoder_state = agent.actor.encoder.state_dict()
+            for k, v in encoder_params.items():
+                if k in encoder_state:
+                    encoder_state[k].copy_(v)
+                    print(f"replaced {k} in pretrained_encoder")
+            
+            agent.actor.encoder.load_state_dict(encoder_state)
+            # Also update critic's encoder if it shares the same architecture
+            if hasattr(agent, 'critic') and hasattr(agent.critic, 'encoder'):
+                agent.critic.encoder.load_state_dict(encoder_state)
 
-    agent = agent.replace(state=agent.state.replace(params=new_params))
-    return agent
+    return agent 
+
+def state_dict_to_numpy(state_dict, skip_optimizer=True):
+    """Recursively convert a nested state dict to numpy arrays for network publishing.
+    
+    Args:
+        state_dict: The state dict to convert
+        skip_optimizer: If True, skip optimizer-related keys (they contain lists that can't be converted)
+    """
+    result = {}
+    for k, v in state_dict.items():
+        # Skip optimizer states - they have complex structures with lists
+        if skip_optimizer and "optimizer" in k:
+            continue
+        # Skip config
+        if k == "config":
+            continue
+            
+        if isinstance(v, torch.Tensor):
+            result[k] = v.detach().cpu().numpy()
+        elif isinstance(v, dict):
+            result[k] = state_dict_to_numpy(v, skip_optimizer=False)
+        else:
+            # Skip non-tensor items
+            continue
+    return result
+
+
+def numpy_to_state_dict(params, device):
+    """Recursively convert numpy arrays back to torch tensors."""
+    result = {}
+    for k, v in params.items():
+        if isinstance(v, np.ndarray):
+            result[k] = torch.as_tensor(v, device=device)
+        elif isinstance(v, dict):
+            result[k] = numpy_to_state_dict(v, device)
+        else:
+            result[k] = v
+    return result
+
+def print_green(x):
+    return print("\033[92m {}\033[00m".format(x))

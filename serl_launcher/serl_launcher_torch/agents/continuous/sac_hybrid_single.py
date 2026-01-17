@@ -8,14 +8,14 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 
-from serl_launcher.common.common import JaxRLTrainState, ModuleDict, nonpytree_field
-from serl_launcher.common.encoding import EncodingWrapper
-from serl_launcher.common.optimizers import make_optimizer
-from serl_launcher.common.typing import Batch, Data, Params, PRNGKey
-from serl_launcher.networks.actor_critic_nets import Critic, Policy, GraspCritic, ensemblize
-from serl_launcher.networks.lagrange import GeqLagrangeMultiplier
-from serl_launcher.networks.mlp import MLP
-from serl_launcher.utils.train_utils import _unpack
+from serl_launcher_torch.common.common import JaxRLTrainState, ModuleDict, nonpytree_field
+from serl_launcher_torch.common.encoding import EncodingWrapper
+from serl_launcher_torch.common.optimizers import make_optimizer
+from serl_launcher_torch.common.typing import Batch, Data, Params, PRNGKey
+from serl_launcher_torch.networks.actor_critic_nets import Critic, Policy, GraspCritic, ensemblize
+from serl_launcher_torch.networks.lagrange import GeqLagrangeMultiplier
+from serl_launcher_torch.networks.mlp import MLP
+from serl_launcher_torch.utils.train_utils import _unpack
 
 
 class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
@@ -569,7 +569,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         critic_network_kwargs["activate_final"] = True
 
         if encoder_type == "resnet":
-            from serl_launcher.vision.resnet_v1 import resnetv1_configs
+            from serl_launcher_torch.vision.resnet_v1 import resnetv1_configs
 
             encoders = {
                 image_key: resnetv1_configs["resnetv1-10"](
@@ -581,7 +581,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
                 for image_key in image_keys
             }
         elif encoder_type == "resnet-pretrained":
-            from serl_launcher.vision.resnet_v1 import (
+            from serl_launcher_torch.vision.resnet_v1 import (
                 PreTrainedResNetEncoder,
                 resnetv1_configs,
             )
@@ -661,7 +661,7 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
         )
 
         if "pretrained" in encoder_type:  # load pretrained weights for ResNet-10
-            from serl_launcher.utils.train_utils import load_resnet10_params
+            from serl_launcher_torch.utils.train_utils import load_resnet10_params
             agent = load_resnet10_params(agent, image_keys)
 
         return agent

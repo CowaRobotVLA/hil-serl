@@ -6,8 +6,10 @@ print(sys.path)
 import glob
 import os
 import pickle as pkl
-import jax
-from jax import numpy as jnp
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
 import flax.linen as nn
 from flax.training import checkpoints
 import numpy as np
@@ -15,10 +17,10 @@ import optax
 from tqdm import tqdm
 from absl import app, flags
 
-from serl_launcher.data.data_store import ReplayBuffer
-from serl_launcher.utils.train_utils import concat_batches
-from serl_launcher.vision.data_augmentations import batched_random_crop
-from serl_launcher.networks.reward_classifier import create_classifier
+from serl_launcher.serl_launcher_torch.data.data_store import ReplayBuffer
+from serl_launcher.serl_launcher_torch.utils.train_utils import concat_batches
+from serl_launcher.serl_launcher_torch.vision.data_augmentations import batched_random_crop
+from serl_launcher.serl_launcher_torch.networks.reward_classifier import create_classifier
 
 from experiments.mappings import CONFIG_MAPPING
 
@@ -35,8 +37,8 @@ def main(_):
     config = CONFIG_MAPPING[FLAGS.exp_name]()
     env = config.get_environment(fake_env=True, save_video=False, classifier=False)
 
-    devices = jax.local_devices()
-    sharding = jax.sharding.PositionalSharding(devices)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
     
     # Create buffer for positive transitions
     pos_buffer = ReplayBuffer(
@@ -60,7 +62,7 @@ def main(_):
         sample_args={
             "batch_size": FLAGS.batch_size // 2,
         },
-        device=sharding.replicate(),
+        device=device,
     )
     
     # Create buffer for negative transitions
@@ -86,82 +88,84 @@ def main(_):
         sample_args={
             "batch_size": FLAGS.batch_size // 2,
         },
-        device=sharding.replicate(),
+        device=device,
     )
 
     print(f"failed buffer size: {len(neg_buffer)}")
     print(f"success buffer size: {len(pos_buffer)}")
 
-    rng = jax.random.PRNGKey(0)
-    rng, key = jax.random.split(rng)
+    torch.manual_seed(0)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(0)
+    np.random.seed(0)
+
+    rng = torch.Generator(device=device)
+    rng.manual_seed(0)
+    
     pos_sample = next(pos_iterator)
     neg_sample = next(neg_iterator)
     sample = concat_batches(pos_sample, neg_sample, axis=0)
 
-    rng, key = jax.random.split(rng)
-    classifier = create_classifier(key, 
-                                   sample["observations"], 
-                                   config.classifier_keys,
-                                   )
+    classifier, optimizer = create_classifier(
+        sample_obs=sample["observations"], 
+        image_keys=config.classifier_keys,
+        device=device
+    )
 
-    def data_augmentation_fn(rng, observations):
-        for pixel_key in config.classifier_keys:
-            observations = observations.copy(
-                add_or_replace={
-                    pixel_key: batched_random_crop(
-                        observations[pixel_key], rng, padding=4, num_batch_dims=2
-                    )
-                }
-            )
-        return observations
-
-    @jax.jit
-    def train_step(state, batch, key):
-        def loss_fn(params):
-            logits = state.apply_fn(
-                {"params": params}, batch["observations"], rngs={"dropout": key}, train=True
-            )
-            return optax.sigmoid_binary_cross_entropy(logits, batch["labels"]).mean()
-
-        grad_fn = jax.value_and_grad(loss_fn)
-        loss, grads = grad_fn(state.params)
-        logits = state.apply_fn(
-            {"params": state.params}, batch["observations"], train=False, rngs={"dropout": key}
-        )
-        train_accuracy = jnp.mean((nn.sigmoid(logits) >= 0.5) == batch["labels"])
-
-        return state.apply_gradients(grads=grads), loss, train_accuracy
-
+    classifier.train()
     for epoch in tqdm(range(FLAGS.num_epochs)):
         # Sample equal number of positive and negative examples
         pos_sample = next(pos_iterator)
         neg_sample = next(neg_iterator)
+        
         # Merge and create labels
-        batch = concat_batches(
-            pos_sample, neg_sample, axis=0
-        )
-        rng, key = jax.random.split(rng)
-        obs = data_augmentation_fn(key, batch["observations"])
-        batch = batch.copy(
-            add_or_replace={
-                "observations": obs,
-                "labels": batch["labels"][..., None],
-            }
-        )
-            
-        rng, key = jax.random.split(rng)
-        classifier, train_loss, train_accuracy = train_step(classifier, batch, key)
+        batch = concat_batches(pos_sample, neg_sample, axis=0)
+        
+        # 数据增强 data_augmentation_fn
+        # 注意：batched_random_crop 需要适配 PyTorch Tensors
+        # 假设 batched_random_crop 可以处理字典输入并返回字典
+        obs = batch["observations"]
+        for pixel_key in config.classifier_keys:
+            # 确保输入是 Tensor
+            if isinstance(obs[pixel_key], torch.Tensor):
+                # 假设 batched_random_crop 的 PyTorch 版本接受 Tensor 和 padding
+                # 注意：PyTorch 中通常不需要 key，或者使用 torch.Generator
+                obs[pixel_key] = batched_random_crop(obs[pixel_key], rng=rng, padding=4)
+        
+        # 更新 batch 中的 observations 和 labels
+        # BCEWithLogitsLoss 需要 float 类型的标签
+        labels = batch["labels"].float().unsqueeze(1) # Shape: [Batch, 1]
+        
+        # 将数据移动到设备 (虽然 ReplayBuffer 可能已经处理了，但确保一下)
+        obs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in obs.items()}
+        labels = labels.to(device)
+
+        # --- PyTorch 训练步骤 ---
+        optimizer.zero_grad()
+        
+        # 前向传播
+        logits = classifier(obs, train=True)
+        
+        # 计算损失
+        loss = nn.BCEWithLogitsLoss(logits, labels)
+        
+        # 计算准确率
+        preds = torch.sigmoid(logits) >= 0.5
+        train_accuracy = (preds == labels).float().mean()
+        
+        # 反向传播与优化
+        loss.backward()
+        optimizer.step()
 
         print(
-            f"Epoch: {epoch+1}, Train Loss: {train_loss:.4f}, Train Accuracy: {train_accuracy:.4f}"
+            f"Epoch: {epoch+1}, Train Loss: {loss.item():.4f}, Train Accuracy: {train_accuracy.item():.4f}"
         )
 
-    checkpoints.save_checkpoint(
-        os.path.join(os.getcwd(), "classifier_ckpt/"),
-        classifier,
-        step=FLAGS.num_epochs,
-        overwrite=True,
-    )
+    os.makedirs(os.path.join(os.getcwd(), "classifier_ckpt/"), exist_ok=True)
+    torch.save({
+        'model_state_dict': classifier.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+    }, os.path.join(os.getcwd(), "classifier_ckpt/", "classifier.pth"))
     
 
 if __name__ == "__main__":

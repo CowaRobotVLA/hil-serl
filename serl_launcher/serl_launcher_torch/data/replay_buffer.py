@@ -1,36 +1,45 @@
 import collections
-from typing import Any, Iterator, Optional, Sequence, Tuple, Union
-
+from typing import Optional, Union
+import torch
 import gymnasium as gym
-import jax
 import numpy as np
-from serl_launcher.data.dataset import Dataset, DatasetDict
+from serl_launcher_torch.data.dataset import Dataset, DatasetDict
 
 
 def _init_replay_dict(
-    obs_space: gym.Space, capacity: int
-) -> Union[np.ndarray, DatasetDict]:
+    obs_space: gym.Space, 
+    capacity: int,
+    device: torch.device
+) -> Union[torch.Tensor, dict]:
     if isinstance(obs_space, gym.spaces.Box):
-        return np.empty((capacity, *obs_space.shape), dtype=obs_space.dtype)
+        return torch.empty((capacity, *obs_space.shape), dtype=torch.float32, device=device)
+        # 如果 dtype 不是 float32，可再加判断：
+        # dtype_map = {np.float32: torch.float32, np.float64: torch.float64, np.uint8: torch.uint8, ...}
     elif isinstance(obs_space, gym.spaces.Dict):
-        data_dict = {}
-        for k, v in obs_space.spaces.items():
-            data_dict[k] = _init_replay_dict(v, capacity)
-        return data_dict
+        return {k: _init_replay_dict(v, capacity, device) 
+                for k, v in obs_space.spaces.items()}
     else:
-        raise TypeError()
+        raise TypeError(f"Unsupported space: {type(obs_space)}")
 
 
 def _insert_recursively(
-    dataset_dict: DatasetDict, data_dict: DatasetDict, insert_index: int
+    dataset_dict: DatasetDict, 
+    data_dict: DatasetDict, 
+    insert_index: int
 ):
-    if isinstance(dataset_dict, np.ndarray):
-        dataset_dict[insert_index] = data_dict
+    """Recursively insert data into dataset dictionary"""
+    if isinstance(dataset_dict, (torch.Tensor, np.ndarray)):
+        if isinstance(data_dict, np.ndarray):
+            dataset_dict[insert_index] = torch.from_numpy(data_dict).to(dataset_dict.device)
+        elif isinstance(data_dict, np.generic):  # Handle numpy scalars (np.bool_, np.float64, etc.)
+            dataset_dict[insert_index] = data_dict.item()
+        else:
+            dataset_dict[insert_index] = data_dict
     elif isinstance(dataset_dict, dict):
         for k in dataset_dict.keys():
             _insert_recursively(dataset_dict[k], data_dict[k], insert_index)
     else:
-        raise TypeError()
+        raise TypeError(f"Unsupported type: {type(dataset_dict)}")
 
 
 class ReplayBuffer(Dataset):
@@ -43,30 +52,35 @@ class ReplayBuffer(Dataset):
         include_next_actions: Optional[bool] = False,
         include_label: Optional[bool] = False,
         include_grasp_penalty: Optional[bool] = False,
+        device: str = "cuda"
     ):
+        self.device = torch.device(device)
+
         if next_observation_space is None:
             next_observation_space = observation_space
 
         observation_data = _init_replay_dict(observation_space, capacity)
         next_observation_data = _init_replay_dict(next_observation_space, capacity)
+
+        # Initialize dataset dictionary with torch tensors
         dataset_dict = dict(
             observations=observation_data,
             next_observations=next_observation_data,
-            actions=np.empty((capacity, *action_space.shape), dtype=action_space.dtype),
-            rewards=np.empty((capacity,), dtype=np.float32),
-            masks=np.empty((capacity,), dtype=np.float32),
-            dones=np.empty((capacity,), dtype=bool),
+            actions=torch.empty((capacity, *action_space.shape), dtype=torch.float32, device=self.device),
+            rewards=torch.empty((capacity,), dtype=torch.float32, device=self.device),
+            masks=torch.empty((capacity,), dtype=torch.float32, device=self.device),
+            dones=torch.empty((capacity,), dtype=torch.bool, device=self.device),
         )
 
         if include_next_actions:
-            dataset_dict['next_actions'] = np.empty((capacity, *action_space.shape), dtype=action_space.dtype)
-            dataset_dict['next_intvn'] = np.empty((capacity,), dtype=bool)
+            dataset_dict['next_actions'] = torch.empty((capacity, *action_space.shape), dtype=torch.float32, device=self.device)
+            dataset_dict['next_intvn'] = torch.empty((capacity,), dtype=torch.bool, device=self.device)
             
         if include_label:
-            dataset_dict['labels'] = np.empty((capacity,), dtype=int)
+            dataset_dict['labels'] = torch.empty((capacity,), dtype=torch.long, device=self.device)
         
         if include_grasp_penalty:
-            dataset_dict['grasp_penalty'] = np.empty((capacity,), dtype=np.float32)
+            dataset_dict['grasp_penalty'] = torch.empty((capacity,), dtype=torch.float32, device=self.device)
 
         super().__init__(dataset_dict)
 
@@ -77,21 +91,43 @@ class ReplayBuffer(Dataset):
     def __len__(self) -> int:
         return self._size
 
-    def insert(self, data_dict: DatasetDict):
-        _insert_recursively(self.dataset_dict, data_dict, self._insert_index)
+    def insert(self, data_dict: dict):
+        # 递归转换为 tensor 并放到正确 device
+        def to_torch_recursive(item):
+            if isinstance(item, np.ndarray):
+                return torch.from_numpy(item).to(self.device)
+            elif isinstance(item, (int, float, bool, np.generic)):
+                return torch.tensor(item, device=self.device)
+            elif isinstance(item, dict):
+                return {k: to_torch_recursive(v) for k, v in item.items()}
+            elif isinstance(item, torch.Tensor):
+                return item.to(self.device)
+            else:
+                return item  # 其他类型直接透传（例如 str 等，视情况）
+
+        converted = to_torch_recursive(data_dict)
+        _insert_recursively(self.dataset_dict, converted, self._insert_index)
 
         self._insert_index = (self._insert_index + 1) % self._capacity
         self._size = min(self._size + 1, self._capacity)
 
     def get_iterator(self, queue_size: int = 2, sample_args: dict = {}, device=None):
-        # See https://flax.readthedocs.io/en/latest/_modules/flax/jax_utils.html#prefetch_to_device
-        # queue_size = 2 should be ok for one GPU.
+        """Get iterator over batches with optional device transfer"""
+        if device is None:
+            device = self.device
+            
         queue = collections.deque()
 
         def enqueue(n):
             for _ in range(n):
                 data = self.sample(**sample_args)
-                queue.append(jax.device_put(data, device=device))
+                # Move batch to specified device
+                if isinstance(data, dict):
+                    data = {
+                        k: (v.to(device) if isinstance(v, torch.Tensor) else v)
+                        for k, v in data.items()
+                    }
+                queue.append(data)
 
         enqueue(queue_size)
         while queue:
@@ -99,7 +135,7 @@ class ReplayBuffer(Dataset):
             enqueue(1)
 
     def download(self, from_idx: int, to_idx: int):
-        indices = np.arange(from_idx, to_idx)
+        indices = torch.arange(from_idx, to_idx, device=self.device)
         data_dict = self.sample(batch_size=len(indices), indx=indices)
         return to_idx, data_dict
 

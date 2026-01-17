@@ -2,9 +2,9 @@ from threading import Lock
 from typing import Union, Iterable
 
 import gymnasium as gym
-import jax
-from serl_launcher.data.replay_buffer import ReplayBuffer
-from serl_launcher.data.memory_efficient_replay_buffer import (
+import torch
+from serl_launcher_torch.data.replay_buffer import ReplayBuffer
+from serl_launcher_torch.data.memory_efficient_replay_buffer import (
     MemoryEfficientReplayBuffer,
 )
 
@@ -24,20 +24,24 @@ class ReplayBufferDataStore(ReplayBuffer, DataStoreBase):
 
     # ensure thread safety
     def insert(self, *args, **kwargs):
+        """Thread-safe insertion into replay buffer"""
         with self._lock:
             super(ReplayBufferDataStore, self).insert(*args, **kwargs)
 
     # ensure thread safety
     def sample(self, *args, **kwargs):
+        """Thread-safe sampling from replay buffer"""
         with self._lock:
             return super(ReplayBufferDataStore, self).sample(*args, **kwargs)
 
     # NOTE: method for DataStoreBase
     def latest_data_id(self):
+        """Get the index of the latest inserted data"""
         return self._insert_index
 
     # NOTE: method for DataStoreBase
     def get_latest_data(self, from_id: int):
+        """Get data since the given ID (Not implemented)"""
         raise NotImplementedError  # TODO
 
 
@@ -48,42 +52,52 @@ class MemoryEfficientReplayBufferDataStore(MemoryEfficientReplayBuffer, DataStor
         action_space: gym.Space,
         capacity: int,
         image_keys: Iterable[str] = ("image",),
+        device: str = "cpu",
         **kwargs,
     ):
         MemoryEfficientReplayBuffer.__init__(
-            self, observation_space, action_space, capacity, pixel_keys=image_keys, **kwargs
+            self, observation_space, action_space, capacity, pixel_keys=image_keys, device=device, **kwargs
         )
         DataStoreBase.__init__(self, capacity)
         self._lock = Lock()
 
     # ensure thread safety
     def insert(self, *args, **kwargs):
+        """Thread-safe insertion into replay buffer"""
         with self._lock:
             super(MemoryEfficientReplayBufferDataStore, self).insert(*args, **kwargs)
 
-    # ensure thread safety
     def sample(self, *args, **kwargs):
+        """Thread-safe sampling from replay buffer"""
         with self._lock:
             return super(MemoryEfficientReplayBufferDataStore, self).sample(
                 *args, **kwargs
             )
 
-    # NOTE: method for DataStoreBase
-    def latest_data_id(self):
+    def latest_data_id(self) -> int:
+        """Get the index of the latest inserted data"""
         return self._insert_index
 
-    # NOTE: method for DataStoreBase
     def get_latest_data(self, from_id: int):
-        raise NotImplementedError  # TODO
+        """Get data since the given ID (Not implemented)"""
+        raise NotImplementedError("TODO")
 
 
 def populate_data_store(
     data_store: DataStoreBase,
     demos_path: str,
+    device: str = "cpu"
 ):
     """
     Utility function to populate demonstrations data into data_store.
-    :return data_store
+    
+    Args:
+        data_store: The data store to populate
+        demos_path: Path to demonstration files
+        device: Device to store tensors on
+        
+    Returns:
+        Populated data store
     """
     import pickle as pkl
     import numpy as np
@@ -93,6 +107,12 @@ def populate_data_store(
         with open(demo_path, "rb") as f:
             demo = pkl.load(f)
             for transition in demo:
+                # Convert numpy arrays to torch tensors if needed
+                if isinstance(transition, dict):
+                    transition = {
+                        k: (torch.from_numpy(v).to(device) if isinstance(v, np.ndarray) else v)
+                        for k, v in transition.items()
+                    }
                 data_store.insert(transition)
         print(f"Loaded {len(data_store)} transitions.")
     return data_store
@@ -101,6 +121,7 @@ def populate_data_store(
 def populate_data_store_with_z_axis_only(
     data_store: DataStoreBase,
     demos_path: str,
+    device: str = "cpu"
 ):
     """
     Utility function to populate demonstrations data into data_store.
@@ -116,22 +137,22 @@ def populate_data_store_with_z_axis_only(
             demo = pkl.load(f)
             for transition in demo:
                 tmp = deepcopy(transition)
-                tmp["observations"]["state"] = np.concatenate(
-                    (
-                        tmp["observations"]["state"][:, :4],
-                        tmp["observations"]["state"][:, 6][None, ...],
-                        tmp["observations"]["state"][:, 10:],
-                    ),
-                    axis=-1,
-                )
-                tmp["next_observations"]["state"] = np.concatenate(
-                    (
-                        tmp["next_observations"]["state"][:, :4],
-                        tmp["next_observations"]["state"][:, 6][None, ...],
-                        tmp["next_observations"]["state"][:, 10:],
-                    ),
-                    axis=-1,
-                )
+                # Convert state arrays to torch tensors and concatenate
+                state = torch.from_numpy(tmp["observations"]["state"]).to(device)
+                next_state = torch.from_numpy(tmp["next_observations"]["state"]).to(device)
+                
+                tmp["observations"]["state"] = torch.cat([
+                    state[:, :4],
+                    state[:, 6:7],
+                    state[:, 10:],
+                ], dim=-1)
+                
+                tmp["next_observations"]["state"] = torch.cat([
+                    next_state[:, :4],
+                    next_state[:, 6:7],
+                    next_state[:, 10:],
+                ], dim=-1)
+                
                 data_store.insert(tmp)
         print(f"Loaded {len(data_store)} transitions.")
-    return data_store
+    return data_store 
