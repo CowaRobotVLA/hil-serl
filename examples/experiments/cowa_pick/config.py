@@ -15,9 +15,9 @@ from serl_robot_infra.robot_env.envs.wrappers import (
 )
 from serl_robot_infra.robot_env.envs.relative_env import RelativeFrame
 from serl_robot_infra.robot_env.envs.cowa_arm_env import DefaultEnvConfig
-from serl_launcher.serl_launcher_torch.wrappers.serl_obs_wrappers import SERLObsWrapper
-from serl_launcher.serl_launcher_torch.wrappers.chunking import ChunkingWrapper
-from serl_launcher.serl_launcher_torch.networks.reward_classifier import load_classifier_func
+from serl_launcher_torch.wrappers.serl_obs_wrappers import SERLObsWrapper
+from serl_launcher_torch.wrappers.chunking import ChunkingWrapper
+from serl_launcher_torch.networks.reward_classifier import load_classifier_func
 
 from experiments.config import DefaultTrainingConfig
 from experiments.cowa_pick.wrapper import PickEnv, GripperPenaltyWrapper

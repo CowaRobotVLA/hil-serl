@@ -10,17 +10,14 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-import flax.linen as nn
-from flax.training import checkpoints
 import numpy as np
-import optax
 from tqdm import tqdm
 from absl import app, flags
 
-from serl_launcher.serl_launcher_torch.data.data_store import ReplayBuffer
-from serl_launcher.serl_launcher_torch.utils.train_utils import concat_batches
-from serl_launcher.serl_launcher_torch.vision.data_augmentations import batched_random_crop
-from serl_launcher.serl_launcher_torch.networks.reward_classifier import create_classifier
+from serl_launcher_torch.data.data_store import ReplayBuffer
+from serl_launcher_torch.utils.train_utils import concat_batches
+from serl_launcher_torch.vision.data_augmentations import batched_random_crop
+from serl_launcher_torch.networks.reward_classifier import create_classifier
 
 from experiments.mappings import CONFIG_MAPPING
 

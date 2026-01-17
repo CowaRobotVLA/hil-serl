@@ -8,10 +8,7 @@ import matplotlib.pyplot as plt
 import imageio
 import torch
 import numpy as np
-import tensorflow as tf
 import wandb
-from flax.core import frozen_dict
-from flax.training import checkpoints
 
 def ask_for_frame(images_dict):    
     # Create a new figure

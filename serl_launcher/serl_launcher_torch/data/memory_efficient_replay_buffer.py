@@ -1,13 +1,11 @@
 import copy
 from typing import Iterable, Optional, Tuple
-
+import torch
 import gymnasium as gym
 import numpy as np
 from serl_launcher_torch.data.dataset import DatasetDict, _sample
 from serl_launcher_torch.data.replay_buffer import ReplayBuffer
-from flax.core import frozen_dict
 from gymnasium.spaces import Box
-
 
 class MemoryEfficientReplayBuffer(ReplayBuffer):
     def __init__(
@@ -18,8 +16,10 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
         pixel_keys: Tuple[str, ...] = ("pixels",),
         include_next_actions: Optional[bool] = False,
         include_grasp_penalty: Optional[bool] = False,
+        device: str = "cpu"  # Store data on CPU by default
     ):
         self.pixel_keys = pixel_keys
+        self.device = torch.device(device)
 
         observation_space = copy.deepcopy(observation_space)
         self._num_stack = None
@@ -43,7 +43,7 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
         next_observation_space = gym.spaces.Dict(next_observation_space_dict)
 
         self._first = True
-        self._is_correct_index = np.full(capacity, False, dtype=bool)
+        self._is_correct_index = torch.full((capacity,), False, dtype=torch.bool, device=self.device)
 
         super().__init__(
             observation_space,
@@ -52,19 +52,28 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
             next_observation_space=next_observation_space,
             include_next_actions=include_next_actions,
             include_grasp_penalty=include_grasp_penalty,
+            device=device
         )
 
     def insert(self, data_dict: DatasetDict):
         if self._insert_index == 0 and self._capacity == len(self) and not self._first:
-            indxs = np.arange(len(self) - self._num_stack, len(self))
+            indxs = torch.arange(len(self) - self._num_stack, len(self), device=self.device)
             for indx in indxs:
                 element = super().sample(1, indx=indx)
                 self._is_correct_index[self._insert_index] = False
                 super().insert(element)
 
-        data_dict = data_dict.copy()
-        data_dict["observations"] = data_dict["observations"].copy()
-        data_dict["next_observations"] = data_dict["next_observations"].copy()
+        data_dict = copy.deepcopy(data_dict)
+        
+        # Convert numpy arrays to torch tensors if needed
+        if isinstance(data_dict["observations"], dict):
+            for k, v in data_dict["observations"].items():
+                if isinstance(v, np.ndarray):
+                    data_dict["observations"][k] = torch.from_numpy(v).to(self.device)
+        if isinstance(data_dict["next_observations"], dict):
+            for k, v in data_dict["next_observations"].items():
+                if isinstance(v, np.ndarray):
+                    data_dict["next_observations"][k] = torch.from_numpy(v).to(self.device)
 
         obs_pixels = {}
         next_obs_pixels = {}
@@ -96,9 +105,9 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
         self,
         batch_size: int,
         keys: Optional[Iterable[str]] = None,
-        indx: Optional[np.ndarray] = None,
+        indx: Optional[torch.Tensor] = None,
         pack_obs_and_next_obs: bool = False,
-    ) -> frozen_dict.FrozenDict:
+    ) -> dict:
         """Samples from the replay buffer.
 
         Args:
@@ -109,21 +118,14 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
                 It's useful when they have overlapping frames.
 
         Returns:
-            A frozen dictionary.
+            A dictionary of batched data.
         """
-
         if indx is None:
-            if hasattr(self.np_random, "integers"):
-                indx = self.np_random.integers(len(self), size=batch_size)
-            else:
-                indx = self.np_random.randint(len(self), size=batch_size)
-
+            indx = torch.randint(len(self), (batch_size,), device=self.device)
+            
             for i in range(batch_size):
                 while not self._is_correct_index[indx[i]]:
-                    if hasattr(self.np_random, "integers"):
-                        indx[i] = self.np_random.integers(len(self))
-                    else:
-                        indx[i] = self.np_random.randint(len(self))
+                    indx[i] = torch.randint(len(self), (1,), device=self.device)
         else:
             raise NotImplementedError()
 
@@ -135,7 +137,6 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
         keys = list(keys)
         keys.remove("observations")
         batch = super().sample(batch_size, keys, indx)
-        batch = batch.unfreeze()
 
         obs_keys = self.dataset_dict["observations"].keys()
         obs_keys = list(obs_keys)
@@ -150,12 +151,16 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
 
         for pixel_key in self.pixel_keys:
             obs_pixels = self.dataset_dict["observations"][pixel_key]
-            obs_pixels = np.lib.stride_tricks.sliding_window_view(
-                obs_pixels, self._num_stack + 1, axis=0
-            )
+            # Convert to torch tensor if needed
+            if isinstance(obs_pixels, np.ndarray):
+                obs_pixels = torch.from_numpy(obs_pixels).to(self.device)
+                
+            # Create sliding window view
+            obs_pixels = obs_pixels.unfold(0, self._num_stack + 1, 1)
             obs_pixels = obs_pixels[indx - self._num_stack]
-            # transpose from (B, H, W, C, T) to (B, T, H, W, C) to follow jaxrl_m convention
-            obs_pixels = obs_pixels.transpose((0, 4, 1, 2, 3))
+            
+            # Transpose from (B, H, W, C, T) to (B, T, H, W, C) to follow convention
+            obs_pixels = obs_pixels.permute(0, 4, 1, 2, 3)
 
             if pack_obs_and_next_obs:
                 batch["observations"][pixel_key] = obs_pixels
@@ -164,4 +169,4 @@ class MemoryEfficientReplayBuffer(ReplayBuffer):
                 if "next_observations" in keys:
                     batch["next_observations"][pixel_key] = obs_pixels[:, 1:, ...]
 
-        return frozen_dict.freeze(batch)
+        return batch 
