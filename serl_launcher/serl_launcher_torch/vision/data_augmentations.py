@@ -1,344 +1,154 @@
-from functools import partial
-
-import jax
-import jax.numpy as jnp
-
-
-def random_crop(img, rng, *, padding):
-    crop_from = jax.random.randint(rng, (2,), 0, 2 * padding + 1)
-    crop_from = jnp.concatenate([crop_from, jnp.zeros((1,), dtype=jnp.int32)])
-    padded_img = jnp.pad(
-        img,
-        (
-            (padding, padding),
-            (padding, padding),
-            (0, 0),
-        ),
-        mode="edge",
-    )
-    return jax.lax.dynamic_slice(padded_img, crop_from, img.shape)
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.transforms.functional as TF
 
 
-@partial(jax.jit, static_argnames=("padding", "num_batch_dims"))
-def batched_random_crop(img, rng, *, padding, num_batch_dims: int = 1):
-    # Flatten batch dims
+def batched_random_crop(img: torch.Tensor, rng: torch.Generator, padding: int, num_batch_dims: int = 1) -> torch.Tensor:
     original_shape = img.shape
-    img = jnp.reshape(img, (-1, *img.shape[num_batch_dims:]))
-
-    rngs = jax.random.split(rng, img.shape[0])
-
-    img = jax.vmap(
-        lambda i, r: random_crop(i, r, padding=padding), in_axes=(0, 0), out_axes=0
-    )(img, rngs)
-
-    # Restore batch dims
-    img = jnp.reshape(img, original_shape)
-    return img
-
-def resize(image, image_dim):
+    batch_size = 1
+    for i in range(num_batch_dims):
+        batch_size *= original_shape[i]
+    
+    H, W, C = original_shape[-3], original_shape[-2], original_shape[-1]
+    img = img.reshape(batch_size, H, W, C)
+    
+    # Pad: [B, H+2*padding, W+2*padding, C]
+    img_bchw = img.permute(0, 3, 1, 2)  # [B, C, H, W]
+    padded = F.pad(img_bchw, (padding, padding, padding, padding), mode="replicate")
+    padded = padded.permute(0, 2, 3, 1)  # [B, H+2*padding, W+2*padding, C]
+    
+    # Generate offsets: [B, 2]
+    offsets = torch.randint(0, 2 * padding + 1, (batch_size, 2), generator=rng).to(img.device)
+    
+    # Use advanced indexing for vectorized cropping
+    # Create index arrays for each batch element
+    h_indices = torch.arange(H, device=img.device).unsqueeze(0).unsqueeze(-1)  # [1, H, 1]
+    w_indices = torch.arange(W, device=img.device).unsqueeze(0).unsqueeze(0)  # [1, 1, W]
+    h_offsets = offsets[:, 0].view(batch_size, 1, 1)  # [B, 1, 1]
+    w_offsets = offsets[:, 1].view(batch_size, 1, 1)  # [B, 1, 1]
+    
+    h_idx = (h_indices + h_offsets).expand(batch_size, H, W)  # [B, H, W]
+    w_idx = (w_indices + w_offsets).expand(batch_size, H, W)  # [B, H, W]
+    b_idx = torch.arange(batch_size, device=img.device).view(batch_size, 1, 1).expand(batch_size, H, W)  # [B, H, W]
+    
+    # Index: padded[b_idx, h_idx, w_idx, :]
+    cropped = padded[b_idx, h_idx, w_idx, :]  # [B, H, W, C]
+    
+    return cropped.reshape(original_shape)
+                             
+def resize(image: torch.Tensor, image_dim: tuple) -> torch.Tensor:
+    """Resize image to given dimensions"""
     assert len(image_dim) == 2
-    new_shape = list(image.shape)
-    new_shape[-3:-1] = image_dim
-    return jax.image.resize(image, new_shape, method="bilinear")
+    return F.interpolate(
+        image.permute(2, 0, 1).unsqueeze(0),  # [1, C, H, W]
+        size=image_dim,
+        mode='bilinear',
+        align_corners=False
+    ).squeeze(0).permute(1, 2, 0)  # Back to [H, W, C]
 
+def _maybe_apply(apply_fn, inputs: torch.Tensor, rng: torch.Generator, apply_prob: float) -> torch.Tensor:
+    """Conditionally apply function with probability"""
+    should_apply = torch.rand(1, generator=rng, device=inputs.device).item() <= apply_prob
+    return apply_fn(inputs) if should_apply else inputs
 
-def _maybe_apply(apply_fn, inputs, rng, apply_prob):
-    should_apply = jax.random.uniform(rng, shape=()) <= apply_prob
-    return jax.lax.cond(should_apply, inputs, apply_fn, inputs, lambda x: x)
+def rgb_to_hsv(r: torch.Tensor, g: torch.Tensor, b: torch.Tensor) -> tuple:
+    """Convert RGB to HSV color space"""
+    return TF.rgb_to_hsv(torch.stack([r, g, b], dim=-1))
 
+def hsv_to_rgb(h: torch.Tensor, s: torch.Tensor, v: torch.Tensor) -> tuple:
+    """Convert HSV to RGB color space"""
+    hsv = torch.stack([h, s, v], dim=-1)
+    rgb = TF.hsv_to_rgb(hsv)
+    return rgb[..., 0], rgb[..., 1], rgb[..., 2]
 
-def _depthwise_conv2d(inputs, kernel, strides, padding):
-    """Computes a depthwise conv2d in Jax.
-    Args:
-        inputs: an NHWC tensor with N=1.
-        kernel: a [H", W", 1, C] tensor.
-        strides: a 2d tensor.
-        padding: "SAME" or "VALID".
-    Returns:
-        The depthwise convolution of inputs with kernel, as [H, W, C].
-    """
-    return jax.lax.conv_general_dilated(
-        inputs,
-        kernel,
-        strides,
-        padding,
-        feature_group_count=inputs.shape[-1],
-        dimension_numbers=("NHWC", "HWIO", "NHWC"),
-    )
+def adjust_brightness(rgb_tuple: tuple, delta: float) -> tuple:
+    """Adjust brightness of RGB image"""
+    return tuple(x + delta for x in rgb_tuple)
 
+def adjust_contrast(image: torch.Tensor, factor: float) -> torch.Tensor:
+    """Adjust contrast of image"""
+    mean = image.mean(dim=(-2, -1), keepdim=True)
+    return factor * (image - mean) + mean
 
-def _gaussian_blur_single_image(image, kernel_size, padding, sigma):
-    """Applies gaussian blur to a single image, given as NHWC with N=1."""
-    radius = int(kernel_size / 2)
-    kernel_size_ = 2 * radius + 1
-    x = jnp.arange(-radius, radius + 1).astype(jnp.float32)
-    blur_filter = jnp.exp(-(x**2) / (2.0 * sigma**2))
-    blur_filter = blur_filter / jnp.sum(blur_filter)
-    blur_v = jnp.reshape(blur_filter, [kernel_size_, 1, 1, 1])
-    blur_h = jnp.reshape(blur_filter, [1, kernel_size_, 1, 1])
-    num_channels = image.shape[-1]
-    blur_h = jnp.tile(blur_h, [1, 1, 1, num_channels])
-    blur_v = jnp.tile(blur_v, [1, 1, 1, num_channels])
-    expand_batch_dim = len(image.shape) == 3
-    if expand_batch_dim:
-        image = image[jnp.newaxis, ...]
-    blurred = _depthwise_conv2d(image, blur_h, strides=[1, 1], padding=padding)
-    blurred = _depthwise_conv2d(blurred, blur_v, strides=[1, 1], padding=padding)
-    blurred = jnp.squeeze(blurred, axis=0)
-    return blurred
+def adjust_saturation(h: torch.Tensor, s: torch.Tensor, v: torch.Tensor, factor: float) -> tuple:
+    """Adjust saturation in HSV space"""
+    return h, torch.clamp(s * factor, 0.0, 1.0), v
 
-
-def _random_gaussian_blur(
-    image, rng, *, kernel_size, padding, sigma_min, sigma_max, apply_prob
-):
-    """Applies a random gaussian blur."""
-    apply_rng, transform_rng = jax.random.split(rng)
-
-    def _apply(image):
-        (sigma_rng,) = jax.random.split(transform_rng, 1)
-        sigma = jax.random.uniform(
-            sigma_rng, shape=(), minval=sigma_min, maxval=sigma_max, dtype=jnp.float32
-        )
-        return _gaussian_blur_single_image(image, kernel_size, padding, sigma)
-
-    return _maybe_apply(_apply, image, apply_rng, apply_prob)
-
-
-def rgb_to_hsv(r, g, b):
-    """Converts R, G, B  values to H, S, V values.
-    Reference TF implementation:
-    https://github.com/tensorflow/tensorflow/blob/master/tensorflow/core/kernels/adjust_saturation_op.cc
-    Only input values between 0 and 1 are guaranteed to work properly, but this
-    function complies with the TF implementation outside of this range.
-    Args:
-        r: A tensor representing the red color component as floats.
-        g: A tensor representing the green color component as floats.
-        b: A tensor representing the blue color component as floats.
-    Returns:
-        H, S, V values, each as tensors of shape [...] (same as the input without
-        the last dimension).
-    """
-    vv = jnp.maximum(jnp.maximum(r, g), b)
-    range_ = vv - jnp.minimum(jnp.minimum(r, g), b)
-    sat = jnp.where(vv > 0, range_ / vv, 0.0)
-    norm = jnp.where(range_ != 0, 1.0 / (6.0 * range_), 1e9)
-
-    hr = norm * (g - b)
-    hg = norm * (b - r) + 2.0 / 6.0
-    hb = norm * (r - g) + 4.0 / 6.0
-
-    hue = jnp.where(r == vv, hr, jnp.where(g == vv, hg, hb))
-    hue = hue * (range_ > 0)
-    hue = hue + (hue < 0)
-
-    return hue, sat, vv
-
-
-def hsv_to_rgb(h, s, v):
-    """Converts H, S, V values to an R, G, B tuple.
-    Reference TF implementation:
-    https://github.com/tensorflow/tensorflow/blob/master/tensorflow/core/kernels/adjust_saturation_op.cc
-    Only input values between 0 and 1 are guaranteed to work properly, but this
-    function complies with the TF implementation outside of this range.
-    Args:
-        h: A float tensor of arbitrary shape for the hue (0-1 values).
-        s: A float tensor of the same shape for the saturation (0-1 values).
-        v: A float tensor of the same shape for the value channel (0-1 values).
-    Returns:
-        An (r, g, b) tuple, each with the same dimension as the inputs.
-    """
-    c = s * v
-    m = v - c
-    dh = (h % 1.0) * 6.0
-    fmodu = dh % 2.0
-    x = c * (1 - jnp.abs(fmodu - 1))
-    hcat = jnp.floor(dh).astype(jnp.int32)
-    rr = (
-        jnp.where(
-            (hcat == 0) | (hcat == 5), c, jnp.where((hcat == 1) | (hcat == 4), x, 0)
-        )
-        + m
-    )
-    gg = (
-        jnp.where(
-            (hcat == 1) | (hcat == 2), c, jnp.where((hcat == 0) | (hcat == 3), x, 0)
-        )
-        + m
-    )
-    bb = (
-        jnp.where(
-            (hcat == 3) | (hcat == 4), c, jnp.where((hcat == 2) | (hcat == 5), x, 0)
-        )
-        + m
-    )
-    return rr, gg, bb
-
-
-def adjust_brightness(rgb_tuple, delta):
-    return jax.tree_map(lambda x: x + delta, rgb_tuple)
-
-
-def adjust_contrast(image, factor):
-    def _adjust_contrast_channel(channel):
-        mean = jnp.mean(channel, axis=(-2, -1), keepdims=True)
-        return factor * (channel - mean) + mean
-
-    return jax.tree_map(_adjust_contrast_channel, image)
-
-
-def adjust_saturation(h, s, v, factor):
-    return h, jnp.clip(s * factor, 0.0, 1.0), v
-
-
-def adjust_hue(h, s, v, delta):
-    # Note: this method exactly matches TF"s adjust_hue (combined with the hsv/rgb
-    # conversions) when running on GPU. When running on CPU, the results will be
-    # different if all RGB values for a pixel are outside of the [0, 1] range.
+def adjust_hue(h: torch.Tensor, s: torch.Tensor, v: torch.Tensor, delta: float) -> tuple:
+    """Adjust hue in HSV space"""
     return (h + delta) % 1.0, s, v
 
-
-def _random_brightness(rgb_tuple, rng, max_delta):
-    delta = jax.random.uniform(rng, shape=(), minval=-max_delta, maxval=max_delta)
-    return adjust_brightness(rgb_tuple, delta)
-
-
-def _random_contrast(rgb_tuple, rng, max_delta):
-    factor = jax.random.uniform(
-        rng, shape=(), minval=1 - max_delta, maxval=1 + max_delta
-    )
-    return adjust_contrast(rgb_tuple, factor)
-
-
-def _random_saturation(rgb_tuple, rng, max_delta):
-    h, s, v = rgb_to_hsv(*rgb_tuple)
-    factor = jax.random.uniform(
-        rng, shape=(), minval=1 - max_delta, maxval=1 + max_delta
-    )
-    return hsv_to_rgb(*adjust_saturation(h, s, v, factor))
-
-
-def _random_hue(rgb_tuple, rng, max_delta):
-    h, s, v = rgb_to_hsv(*rgb_tuple)
-    delta = jax.random.uniform(rng, shape=(), minval=-max_delta, maxval=max_delta)
-    return hsv_to_rgb(*adjust_hue(h, s, v, delta))
-
-
-def _to_grayscale(image):
-    rgb_weights = jnp.array([0.2989, 0.5870, 0.1140])
-    grayscale = jnp.tensordot(image, rgb_weights, axes=(-1, -1))[..., jnp.newaxis]
-    return jnp.tile(grayscale, (1, 1, 3))  # Back to 3 channels.
-
-
 def color_transform(
-    image,
-    rng,
-    *,
-    brightness,
-    contrast,
-    saturation,
-    hue,
-    to_grayscale_prob,
-    color_jitter_prob,
-    apply_prob,
-    shuffle
-):
-    """Applies color jittering to a single image."""
-    apply_rng, transform_rng = jax.random.split(rng)
-    perm_rng, b_rng, c_rng, s_rng, h_rng, cj_rng, gs_rng = jax.random.split(
-        transform_rng, 7
-    )
+    image: torch.Tensor,
+    rng: torch.Generator,
+    brightness: float = 0.0,
+    contrast: float = 0.0,
+    saturation: float = 0.0,
+    hue: float = 0.0,
+    to_grayscale_prob: float = 0.0,
+    color_jitter_prob: float = 1.0,
+    apply_prob: float = 1.0,
+    shuffle: bool = True
+) -> torch.Tensor:
+    """Apply color jittering to image"""
+    def _to_grayscale(image):
+        rgb_weights = torch.tensor([0.2989, 0.5870, 0.1140], device=image.device)
+        grayscale = (image * rgb_weights).sum(dim=-1, keepdim=True)
+        return grayscale.repeat(1, 1, 3)
 
-    # Whether the transform should be applied at all.
-    should_apply = jax.random.uniform(apply_rng, shape=()) <= apply_prob
-    # Whether to apply grayscale transform.
-    should_apply_gs = jax.random.uniform(gs_rng, shape=()) <= to_grayscale_prob
-    # Whether to apply color jittering.
-    should_apply_color = jax.random.uniform(cj_rng, shape=()) <= color_jitter_prob
+    should_apply = torch.rand(1, generator=rng, device=image.device).item() <= apply_prob
+    should_apply_gs = torch.rand(1, generator=rng, device=image.device).item() <= to_grayscale_prob
+    should_apply_color = torch.rand(1, generator=rng, device=image.device).item() <= color_jitter_prob
 
-    # Decorator to conditionally apply fn based on an index.
-    def _make_cond(fn, idx):
-        def identity_fn(x, unused_rng, unused_param):
-            return x
-
-        def cond_fn(args, i):
-            def clip(args):
-                return jax.tree_map(lambda arg: jnp.clip(arg, 0.0, 1.0), args)
-
-            out = jax.lax.cond(
-                should_apply & should_apply_color & (i == idx),
-                args,
-                lambda a: clip(fn(*a)),
-                args,
-                lambda a: identity_fn(*a),
-            )
-            return jax.lax.stop_gradient(out)
-
-        return cond_fn
-
-    random_brightness_cond = _make_cond(_random_brightness, idx=0)
-    random_contrast_cond = _make_cond(_random_contrast, idx=1)
-    random_saturation_cond = _make_cond(_random_saturation, idx=2)
-    random_hue_cond = _make_cond(_random_hue, idx=3)
-
-    def _color_jitter(x):
-        rgb_tuple = tuple(jax.tree_map(jnp.squeeze, jnp.split(x, 3, axis=-1)))
+    if should_apply and should_apply_color:
+        transforms = []
+        if brightness > 0:
+            transforms.append(lambda img: TF.adjust_brightness(img, 1 + torch.rand(1, generator=rng).item() * brightness))
+        if contrast > 0:
+            transforms.append(lambda img: TF.adjust_contrast(img, 1 + torch.rand(1, generator=rng).item() * contrast))
+        if saturation > 0:
+            transforms.append(lambda img: TF.adjust_saturation(img, 1 + torch.rand(1, generator=rng).item() * saturation))
+        if hue > 0:
+            transforms.append(lambda img: TF.adjust_hue(img, torch.rand(1, generator=rng).item() * hue))
+            
         if shuffle:
-            order = jax.random.permutation(perm_rng, jnp.arange(4, dtype=jnp.int32))
-        else:
-            order = range(4)
-        for idx in order:
-            if brightness > 0:
-                rgb_tuple = random_brightness_cond((rgb_tuple, b_rng, brightness), idx)
-            if contrast > 0:
-                rgb_tuple = random_contrast_cond((rgb_tuple, c_rng, contrast), idx)
-            if saturation > 0:
-                rgb_tuple = random_saturation_cond((rgb_tuple, s_rng, saturation), idx)
-            if hue > 0:
-                rgb_tuple = random_hue_cond((rgb_tuple, h_rng, hue), idx)
-        return jnp.stack(rgb_tuple, axis=-1)
-
-    out_apply = _color_jitter(image)
-    out_apply = jax.lax.cond(
-        should_apply & should_apply_gs, out_apply, _to_grayscale, out_apply, lambda x: x
-    )
-    return jnp.clip(out_apply, 0.0, 1.0)
-
-
-def random_flip(image, rng):
-    _, flip_rng = jax.random.split(rng)
-    should_flip_lr = jax.random.uniform(flip_rng, shape=()) <= 0.5
-    image = jax.lax.cond(should_flip_lr, image, jnp.fliplr, image, lambda x: x)
-    return image
-
+            indices = torch.randperm(len(transforms), generator=rng)
+            transforms = [transforms[i] for i in indices]
+            
+        image_NCHW = image.permute(2, 0, 1).unsqueeze(0)
+        for t in transforms:
+            image_NCHW = t(image_NCHW)
+        image = image_NCHW.squeeze(0).permute(1, 2, 0)
+        
+    if should_apply and should_apply_gs:
+        image = _to_grayscale(image)
+        
+    return torch.clamp(image, 0.0, 1.0)
 
 def gaussian_blur(
-    image, rng, *, blur_divider=10.0, sigma_min=0.1, sigma_max=2.0, apply_prob=1.0
-):
-    """Applies gaussian blur to a batch of images.
-    Args:
-        images: an NHWC tensor, with C=3.
-        rng: a single PRNGKey.
-        blur_divider: the blurring kernel will have size H / blur_divider.
-        sigma_min: the minimum value for sigma in the blurring kernel.
-        sigma_max: the maximum value for sigma in the blurring kernel.
-        apply_prob: the probability of applying the transform to a batch element.
-    Returns:
-        A NHWC tensor of the blurred images.
-    """
-    kernel_size = image.shape[0] / blur_divider
-    blur_fn = partial(
-        _random_gaussian_blur,
-        kernel_size=kernel_size,
-        padding="SAME",
-        sigma_min=sigma_min,
-        sigma_max=sigma_max,
-        apply_prob=apply_prob,
-    )
-    return blur_fn(rng, image)
-
-
-def solarize(image, rng, *, threshold, apply_prob):
+    image: torch.Tensor,
+    rng: torch.Generator,
+    blur_divider: float = 10.0,
+    sigma_min: float = 0.1,
+    sigma_max: float = 2.0,
+    apply_prob: float = 1.0
+) -> torch.Tensor:
+    """Apply gaussian blur to image"""
+    kernel_size = int(image.shape[0] / blur_divider) | 1  # Ensure odd kernel size
+    
     def _apply(image):
-        return jnp.where(image < threshold, image, 1.0 - image)
-
+        sigma = sigma_min + torch.rand(1, generator=rng, device=image.device).item() * (sigma_max - sigma_min)
+        return TF.gaussian_blur(
+            image.permute(2, 0, 1).unsqueeze(0),
+            kernel_size=[kernel_size, kernel_size],
+            sigma=[sigma, sigma]
+        ).squeeze(0).permute(1, 2, 0)
+        
     return _maybe_apply(_apply, image, rng, apply_prob)
+
+def solarize(image: torch.Tensor, rng: torch.Generator, threshold: float, apply_prob: float) -> torch.Tensor:
+    """Apply solarize effect to image"""
+    def _apply(image):
+        return torch.where(image < threshold, image, 1.0 - image)
+    return _maybe_apply(_apply, image, rng, apply_prob) 

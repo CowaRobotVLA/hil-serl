@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import optax
 from flax import struct
 
-from serl_launcher.common.typing import Params, PRNGKey
+from serl_launcher_torch.common.typing import Params, PRNGKey
 
 nonpytree_field = functools.partial(flax.struct.field, pytree_node=False)
 

@@ -9,8 +9,8 @@ import requests
 import os
 from tqdm import tqdm
 import timm
-from serl_launcher.vision.resnet_v1 import PreTrainedResNetEncoder
-from serl_launcher.common.encoding import EncodingWrapper
+from serl_launcher_torch.vision.resnet_v1 import PreTrainedResNetEncoder
+from serl_launcher_torch.common.encoding import EncodingWrapper
 
 
 class BinaryClassifier(nn.Module):

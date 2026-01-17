@@ -4,7 +4,7 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 
-from serl_launcher.common.common import default_init
+from serl_launcher_torch.common.common import default_init
 
 
 class MLP(nn.Module):

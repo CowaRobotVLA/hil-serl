@@ -86,7 +86,7 @@ class TrainConfig(DefaultTrainingConfig):
     discount = 0.98
     buffer_period = 1000
     encoder_type = "resnet-pretrained"
-    setup_mode = "single-arm-learned-gripper"
+    setup_mode = "single-arm-fixed-gripper" # "single-arm-learned-gripper"
 
     def get_environment(self, fake_env=False, save_video=False, classifier=False, device = "cuda"):
         env = PickEnv(
