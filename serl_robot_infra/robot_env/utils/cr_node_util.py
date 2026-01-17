@@ -13,9 +13,10 @@ from loguru import logger
 import pycrmw
 import crpilot
 from queue import Queue
-from msgs import record_pb2, pose_pb2, chassis_pb2, wheel_pb2, wheel_env_pb2, shared_msg_pb2, arm_eepos_pb2
+from msgs import record_pb2, pose_pb2, chassis_pb2, wheel_pb2, wheel_env_pb2, shared_msg_pb2, arm_eepos_pb2, stream_pb2
 # from msgs import wheel_pb2
 from queue import Empty
+import struct
 
 class ThreadSafeStack:
     def __init__(self, max_size: int = 1000):
@@ -369,6 +370,46 @@ class ExpertStateDecoder(BasicDecoder):
             else:
                 time.sleep(self.min_interval)
 
+class LeaderCommandDecoder(BasicDecoder):
+    
+    def __call__(self, msg: stream_pb2.Stream):
+        super().__call__(msg)
+
+    def deserialize_double_array(self,send_data):
+        # 验证
+        if len(send_data) % 8 != 0:
+            raise ValueError("Invalid send data length for double array")
+        if len(send_data) == 0:
+            raise ValueError("gr control data length is 0")
+        
+        # 解析
+        count = len(send_data) // 8
+        cmds = struct.unpack(f'{count}d', send_data)
+        
+        # 创建16元素列表，填充前15个
+        cmd_list = [0.0] * 16
+        for i in range(min(count, 15)):
+            cmd_list[i] = cmds[i]
+        
+        return cmd_list
+    def _decode_loop(self):
+        while 1:
+            # print(f"{self.stop_flag=}")
+            if not self.stop_flag:
+                try:
+                    # print("cache length: ", self.cache.qsize())
+                    msg = self.cache.get(timeout=0.1)  # 没消息会常见性超时
+                except Empty:
+                    continue  # 正常情况：这轮没消息，继续下一轮
+                action = np.array(self.deserialize_double_array(msg.buffer[0].send[0]))[:7]
+                # 控制频率
+                current_time = time.time()
+                if current_time - self.last_push_time >= self.min_interval or self.last_push_time==0.0:
+                    self.stack.push({"expert_action": action,  "timestamp": time.time()})
+                    self.last_push_time = current_time
+            else:
+                time.sleep(self.min_interval)
+
 class EeposeDecoder(BasicDecoder):
     def __call__(self, msg: arm_eepos_pb2.ArmeePos):
         super().__call__(msg)
@@ -394,7 +435,7 @@ class EeposeDecoder(BasicDecoder):
                 quat = msg.quat
                 pose = [msg.x, msg.y, msg.z]
                 rpy = [msg.roll,msg.pitch,msg.yaw]
-                eepose = np.concatenate(pose, quat)
+                eepose = np.concatenate((pose, np.array((quat.x,quat.y,quat.z,quat.w))))
                 T = self.quat_xyz_to_homogeneous(pose[0],pose[1],pose[2],quat.x,quat.y,quat.z,quat.w)
                 current_time = time.time()
                 if current_time - self.last_push_time >= self.min_interval or self.last_push_time==0.0:
@@ -481,13 +522,14 @@ if __name__ == "__main__":
 
     def test_expert_state(node):
         expert_stack = ThreadSafeStack(10)
-        expert_decoder = ExpertStateDecoder(stack=expert_stack, freq=30)
-        reader = node.CreateReader("/motor_info/arm", expert_decoder)
+        expert_decoder = LeaderCommandDecoder(stack=expert_stack, freq=10)
+        reader = node.CreateReader("/gr/control", expert_decoder)
         while 1:
             flag, expert_state = expert_stack.peek()
             if flag:
-                a = expert_state['expert_state']
+                a = expert_state['expert_action']
                 time.sleep(0.05)
+
 
     import sys,os
     pycrmw.Init(sys.argv)

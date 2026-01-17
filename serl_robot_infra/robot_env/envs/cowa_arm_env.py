@@ -15,11 +15,12 @@ from typing import Dict
 
 # from franka_env.camera.video_capture import VideoCapture
 # from franka_env.camera.rs_capture import RSCapture
-from serl_robot_infra.cowa_env.utils.rotations import euler_2_quat, quat_2_euler
+from serl_robot_infra.robot_env.utils.rotations import euler_2_quat, quat_2_euler
 import pycrmw
 import sys,os
-from serl_robot_infra.cowa_env.utils.cr_node_util import ThreadSafeStack, RawImageDecoder
-from serl_robot_infra.cowa_env.envs.wrappers import HilserlArmControllerWrapper
+from serl_robot_infra.robot_env.utils.cr_node_util import ThreadSafeStack, RawImageDecoder
+from serl_robot_infra.robot_env.envs.wrappers import HilserlArmControllerWrapper
+from msgs.crmw_pb2 import Service
 
 class ImageDisplayer(threading.Thread):
     def __init__(self, queue, name):
@@ -90,7 +91,7 @@ class cowa_env(gym.Env):
         if not pycrmw.IsOK():
             os._exit(0)
         self.node = pycrmw.Node("test")
-        self.arm_contoller = HilserlArmControllerWrapper(self.node, 7)
+        self.arm_controller = HilserlArmControllerWrapper(self.node, 7)
         self.action_scale = config.ACTION_SCALE
         self._TARGET_POSE = config.TARGET_POSE
         self._RESET_POSE = config.RESET_POSE
@@ -132,8 +133,8 @@ class cowa_env(gym.Env):
         )
         # Action/Observation Space
         self.action_space = gym.spaces.Box(
-            np.ones((8,), dtype=np.float32) * -1,
-            np.ones((8,), dtype=np.float32),
+            np.ones((7,), dtype=np.float32) * -1,
+            np.ones((7,), dtype=np.float32),
         )
 
         self.observation_space = gym.spaces.Dict(
@@ -145,6 +146,12 @@ class cowa_env(gym.Env):
                         ),  # xyz + quat
                         "tcp_vel": gym.spaces.Box(-np.inf, np.inf, shape=(6,)),
                         "gripper_pose": gym.spaces.Box(-1, 1, shape=(1,)),
+                        "q": gym.spaces.Box(
+                            -np.inf, np.inf, shape=(6,)
+                        ),  # xyz + quat
+                        "dq": gym.spaces.Box(
+                            -np.inf, np.inf, shape=(6,)
+                        ),  # xyz + quat
                         # "tcp_force": gym.spaces.Box(-np.inf, np.inf, shape=(3,)),
                         # "tcp_torque": gym.spaces.Box(-np.inf, np.inf, shape=(3,)),
                     }
@@ -175,17 +182,35 @@ class cowa_env(gym.Env):
             for _ in range(2):
                 self._recover()
                 time.sleep(1)
+        pycrmw.ServiceRegister("hil_serl_arg", self.exec_cmd, Service)
+        # if not fake_env:
+        #     from pynput import keyboard
+        #     self.terminate = False
+        #     def on_press(key):
+        #         if key == keyboard.Key.esc:
+        #             self.terminate = True
+        #     self.listener = keyboard.Listener(on_press=on_press)
+        #     self.listener.start()
+        self.terminate = False
 
-        if not fake_env:
-            from pynput import keyboard
-            self.terminate = False
-            def on_press(key):
-                if key == keyboard.Key.esc:
-                    self.terminate = True
-            self.listener = keyboard.Listener(on_press=on_press)
-            self.listener.start()
-
+        self.success_key = [False]
         print("Initialized Franka")
+
+    def exec_cmd(self,s: Service):
+        if len(s.arg) > 0:
+            if s.arg[0] == b'terminate':
+                self.terminate = True
+                s.ret = b"terminate"
+                print("terminate")
+            elif s.arg[0] == b'success':
+                self.success_key = True
+                s.ret = b"success"
+                print("success")
+            elif s.arg[0] == b'fail':
+                self.success_key = False
+                s.ret = b"fail"
+                print("fail")
+        return s
 
     def clip_safety_box(self, pose: np.ndarray) -> np.ndarray:
         """Clip the pose to be within the safety box."""
@@ -222,11 +247,11 @@ class cowa_env(gym.Env):
 
         # GET ORIENTATION FROM ACTION
         self.nextpos[3:] = (
-            Rotation.quat(action[3:7] * self.action_scale[1])
+            Rotation.from_rotvec(action[3:6] * self.action_scale[1])
             * Rotation.from_quat(self.currpos[3:])
         ).as_quat()
 
-        gripper_action = (action[7] + 1)* self.action_scale[2]
+        gripper_action = (action[6] + 1)* self.action_scale[2]
         self._send_command(self.nextpos, gripper_action)
 
         self.curr_path_length += 1
@@ -294,7 +319,7 @@ class cowa_env(gym.Env):
                 display_images[key_name] = resized
                 display_images[key_name + "_full"] = cropped_rgb
                 full_res_images[key_name] = copy.deepcopy(cropped_rgb)
-
+                # cv2.imwrite("test.png", resized)
             except Exception as e:
                 print(f"[Error] Processing image for {key_name}: {e}")
                 # 如果处理出错，可以选择返回旧数据或者抛出异常
@@ -308,7 +333,7 @@ class cowa_env(gym.Env):
         # 5. 显示图片 (保留原版逻辑)
         if self.display_image:
             self.img_queue.put(display_images)
-            
+
         return images
 
     def interpolate_move(self, goal: np.ndarray, timeout: float):
@@ -364,7 +389,6 @@ class cowa_env(gym.Env):
 
     def reset(self, joint_reset=False, **kwargs):
         self.last_gripper_act = time.time()
-        requests.post(self.url + "update_param", json=self.config.COMPLIANCE_PARAM)
         if self.save_video:
             self.save_video_recording()
 
@@ -373,9 +397,7 @@ class cowa_env(gym.Env):
             self.cycle_count = 0
             joint_reset = True
 
-        self._recover()
         self.go_to_reset(joint_reset=joint_reset)
-        self._recover()
         self.curr_path_length = 0
 
         self._update_currpos()
@@ -464,23 +486,22 @@ class cowa_env(gym.Env):
         requests.post(self.url + "clearerr")
 
     def _send_command(self, eepos, grip_pos):
-        q = self.arm_contoller.get_q_by_ee_pos(eepos[:3], eepos[3:], grip_pos)
-        self.arm_contoller.set_target(q) 
+        q = self.arm_controller.get_q_by_ee_pos(eepos[:3], eepos[3:], grip_pos)
+        self.arm_controller.set_target(q) 
 
     def _update_currpos(self):
         """
         Internal function to get the latest state of the robot and its gripper.
         """
 
-        ps = self.arm_stack.peek()
-        self.currpos = self.arm_contoller.get_eepos_state()
-        self.q, self.dq= self.arm_contoller.get_arm_state()
+        self.currpos = self.arm_controller.get_eepos_state()
+        self.q, self.dq= self.arm_controller.get_arm_state()
         # self.currforce = np.array(ps["force"])
         # self.currtorque = np.array(ps["torque"])
         # self.currjacobian = np.reshape(np.array(ps["jacobian"]), (6, 7))
         self.curr_gripper_pos = self.q[0]
         self.q = self.q[1:]
-        self.dq = self.currvel[1:]
+        self.dq = self.dq[1:]
         # self.currtorque = self.currtorque[1:]
 
     def update_currpos(self):
@@ -513,9 +534,9 @@ class cowa_env(gym.Env):
         return copy.deepcopy(dict(images=images, state=state_observation))
 
     def close(self):
-        if hasattr(self, 'listener'):
-            self.listener.stop()
-        self.close_cameras()
+        # if hasattr(self, 'listener'):
+        #     self.listener.stop()
+        # self.close_cameras()
         if self.display_image:
             self.img_queue.put(None)
             cv2.destroyAllWindows()

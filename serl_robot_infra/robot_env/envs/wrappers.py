@@ -4,13 +4,13 @@ import gymnasium as gym
 import numpy as np
 from gymnasium.spaces import Box
 import copy
-from serl_robot_infra.cowa_env.spacemouse.spacemouse_expert import SpaceMouseExpert
+from serl_robot_infra.robot_env.spacemouse.spacemouse_expert import SpaceMouseExpert
 import requests
 from scipy.spatial.transform import Rotation as R
-from serl_robot_infra.cowa_env.envs.cowa_arm_env import cowa_env
 from typing import List
-from cowa_env.utils.arm_controller import ArmController
-from cowa_env.utils.cr_node_util import ThreadSafeStack, ArmStateDecoder, RawImageDecoder
+import threading
+from serl_robot_infra.robot_env.utils.arm_controller import ArmController
+from serl_robot_infra.robot_env.utils.cr_node_util import ThreadSafeStack, LeaderCommandDecoder, ExpertStateDecoder
 
 sigmoid = lambda x: 1 / (1 + np.exp(-x))
 
@@ -18,11 +18,15 @@ class HilserlArmControllerWrapper(ArmController):
     def __init__(self, node, dof_num, control_mode = "vel", receive_interval=0.002, publish_interval=0.01, timeout_interval=0.2):
         super().__init__(node, dof_num, control_mode, receive_interval, publish_interval, timeout_interval)
         self.expert_command_stack = ThreadSafeStack(max_size=1)
-        expert_command_decoder = ArmStateDecoder(stack=self.expert_command_stack, freq=100)
-        self.expert_command_reader = node.CreateReader("/RL/base_info/leader_arm", expert_command_decoder)
+        expert_command_decoder = LeaderCommandDecoder(stack=self.expert_command_stack, freq=20)
+        self.expert_command_reader = node.CreateReader("/gr/control", expert_command_decoder)
         self.expert_state_stack = ThreadSafeStack(max_size=1)
-        expert_state_decoder = ArmStateDecoder(stack=self.expert_state_stack, freq=100)
+        expert_state_decoder = ExpertStateDecoder(stack=self.expert_state_stack, freq=100)
         self.expert_state_reader = node.CreateReader("/motor_info/arm", expert_state_decoder)
+        self.update_expert_state_thread = threading.Thread(target=self._update_expert_state, daemon=True)
+        self.update_expert_state_thread.start()
+        self.update_expert_command_thread = threading.Thread(target=self._update_expert_action, daemon=True)
+        self.update_expert_command_thread.start()
         self.expert_action = None
         self.expert_state = None
 
@@ -32,11 +36,13 @@ class HilserlArmControllerWrapper(ArmController):
             while not flag:
                 time.sleep(0.01)
                 flag, expert_action = self.expert_command_stack.pop()
-            self.set_expert_action(expert_action)
+            self.set_expert_action(expert_action["expert_action"])
             time.sleep(1/30)
     
     def set_expert_action(self, expert_action):
         with self.arm_state_lock:
+            if self.expert_action is None:
+                self.expert_action = np.zeros(8) 
             self.expert_action[:3], self.expert_action[3:7] = self.get_ee_pos_by_q(expert_action[1:])
             self.expert_action[7] = expert_action[0]
 
@@ -49,7 +55,7 @@ class HilserlArmControllerWrapper(ArmController):
             while not flag:
                 time.sleep(0.01)
                 flag, expert_state = self.expert_state_stack.pop()
-            self.set_expert_action(expert_state)
+            self.set_expert_state(expert_state)
             time.sleep(1/30)
     
     def set_expert_state(self, expert_state):
@@ -260,10 +266,45 @@ class SpacemouseIntervention(gym.ActionWrapper):
         if self.action_space.shape == (6,):
             self.gripper_enabled = False
 
-        self.expert = SpaceMouseExpert()
         self.left, self.right = False, False
         self.action_indices = action_indices
 
+    def compute_delta_pose(self, current_pose, target_pose):
+        """
+        计算两个末端位姿之间的增量
+        
+        Args:
+            current_pose: [x, y, z, qx, qy, qz, qw] (7,)
+            target_pose: [x, y, z, qx, qy, qz, qw] (7,)
+        
+        Returns:
+            delta_pose: [dx, dy, dz, ax, ay, az] (6,) 
+                        前3维是位置差，后3维是轴角表示的旋转差
+        """
+        # 分离位置和四元数
+        pos_current = current_pose[:3]
+        quat_current = current_pose[3:]  # [qx, qy, qz, qw]
+        
+        pos_target = target_pose[:3]
+        quat_target = target_pose[3:]
+        
+        # 1. 计算位置差
+        delta_pos = pos_target - pos_current
+        
+        # 2. 计算旋转差
+        # R_delta = R_target * R_current^(-1)
+        rot_current = R.from_quat(quat_current)
+        rot_target = R.from_quat(quat_target)
+        
+        rot_delta = rot_target * rot_current.inv()
+        
+        # 3. 转换为轴角表示（旋转向量）
+        delta_rot = rot_delta.as_rotvec()  # [ax*θ, ay*θ, az*θ]
+        
+        # 4. 拼接结果
+        delta_pose = np.concatenate([delta_pos, delta_rot])
+        
+        return delta_pose
     def action(self, action: np.ndarray) -> np.ndarray:
         """
         Input:
@@ -273,9 +314,13 @@ class SpacemouseIntervention(gym.ActionWrapper):
         """
         flag = self.env.arm_controller.get_expert_state()
         expert_a = self.env.arm_controller.get_expert_action()
+        self.env._update_currpos()
+        delta_action = np.zeros(7)
+        delta_action[:-1] = self.compute_delta_pose(self.env.currpos, expert_a[:-1])
+        delta_action[-1] = expert_a[-1] / 50.0 - 1
 
         if flag:
-            return expert_a, True
+            return delta_action, True
 
         return action, False
 
@@ -366,7 +411,7 @@ class DualSpacemouseIntervention(gym.ActionWrapper):
 class GripperPenaltyWrapper(gym.RewardWrapper):
     def __init__(self, env, penalty=0.1):
         super().__init__(env)
-        assert env.action_space.shape == (7,)
+        assert env.action_space.shape == (8,)
         self.penalty = penalty
         self.last_gripper_pos = None
 

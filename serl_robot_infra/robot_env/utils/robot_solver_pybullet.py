@@ -123,7 +123,7 @@ class RobotSolver:
         return pos, quat
 
     # ----------------------------- forward kinematics -----------------------------
-    def forward_kinematics(self, joint_positions: List[float], link_index: int=19) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def forward_kinematics(self, joint_positions: List[float], link_index: int=18) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Set the robot to `joint_positions` (for movable joints only) and return
         the link pose in world and the 4x4 homogeneous transform.
 
@@ -142,7 +142,7 @@ class RobotSolver:
         return pos, quat, T
 
     # ----------------------------- inverse kinematics -----------------------------
-    def inverse_kinematics(self, target_pos: List[float], target_quat: Optional[List[float]], link_index: int=19,
+    def inverse_kinematics(self, target_pos: List[float], target_quat: Optional[List[float]], link_index: int=18,
                            rest_poses: Optional[List[float]] = None, max_iters: int = 1) -> List[float]:
         """Compute IK using PyBullet's calculateInverseKinematics and map results to movable joints.
 
@@ -240,8 +240,8 @@ class RobotSolver:
 # ----------------------------- example usage -----------------------------
 if __name__ == '__main__':
     # path to URDF: adapt to your project structure
-    urdf = 'assets/cowarm/urdf/cowa_4rad_w_arm_6dof.urdf'
-    kb = RobotSolver(urdf, base_position=(0, 0, 0), use_gui=True)
+    urdf = '/home/cowa/hil-serl/serl_robot_infra/robot_env/cowarm/urdf/cowa_4rad_w_arm_6dof.urdf'
+    kb = RobotSolver(urdf, base_position=(0, 0, 0), use_gui=False)
 
     print('robot_id', kb.robot_id)
     print('num_joints', kb.num_joints)

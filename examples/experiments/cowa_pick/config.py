@@ -1,7 +1,12 @@
 import os
 import torch
 import numpy as np
-
+import sys
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# 计算 'examples' 目录的路径 (假设是当前文件的上两级: cowa_pick -> experiments -> examples)
+examples_dir = os.path.join(current_dir, "..", "..")
+# 将其加入系统路径
+sys.path.append(examples_dir)
 
 from serl_robot_infra.robot_env.envs.wrappers import (
     Quat2EulerWrapper,
@@ -10,9 +15,9 @@ from serl_robot_infra.robot_env.envs.wrappers import (
 )
 from serl_robot_infra.robot_env.envs.relative_env import RelativeFrame
 from serl_robot_infra.robot_env.envs.cowa_arm_env import DefaultEnvConfig
-from serl_launcher.wrappers.serl_obs_wrappers import SERLObsWrapper
-from serl_launcher.wrappers.chunking import ChunkingWrapper
-from serl_launcher.networks.reward_classifier import load_classifier_func
+from serl_launcher.serl_launcher_torch.wrappers.serl_obs_wrappers import SERLObsWrapper
+from serl_launcher.serl_launcher_torch.wrappers.chunking import ChunkingWrapper
+from serl_launcher.serl_launcher_torch.networks.reward_classifier import load_classifier_func
 
 from experiments.config import DefaultTrainingConfig
 from experiments.cowa_pick.wrapper import PickEnv, GripperPenaltyWrapper
@@ -20,15 +25,12 @@ from experiments.cowa_pick.wrapper import PickEnv, GripperPenaltyWrapper
 
 class EnvConfig(DefaultEnvConfig):
     SERVER_URL: str = "http://127.0.0.2:5000/"
-    IMAGE_CROP = {"wrist_1": lambda img: img[50:-200, 200:-200],
-                  "wrist_2": lambda img: img[:-200, 200:-200],
-                  "side_policy": lambda img: img[250:500, 350:650],
-                  "side_classifier": lambda img: img[270:398, 500:628]}
-    TARGET_POSE = np.array([0.553,0.1769683108549487,0.25097833796596336, np.pi, 0, -np.pi/2])
-    RESET_POSE = TARGET_POSE + np.array([0, 0.03, 0.05, 0, 0, 0])
+    IMAGE_CROP = {"panorama/3": lambda img: img[50:-200, 200:-200]}
+    TARGET_POSE = np.array([0.4,0.0,-0.1, 0, np.pi/2, 0])
+    RESET_POSE = TARGET_POSE + np.array([0, 0, 0.02, 0, 0, 0])
     ACTION_SCALE = np.array([0.015, 0.1, 1])
     RANDOM_RESET = True
-    DISPLAY_IMAGE = True
+    DISPLAY_IMAGE = False
     RANDOM_XY_RANGE = 0.01
     RANDOM_RZ_RANGE = 0.1
     ABS_POSE_LIMIT_HIGH = TARGET_POSE + np.array([0.03, 0.06, 0.05, 0.1, 0.1, 0.3])

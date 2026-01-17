@@ -5,31 +5,43 @@ import requests
 import copy
 import gymnasium as gym
 import time
+from msgs.crmw_pb2 import Service
 from serl_robot_infra.robot_env.envs.cowa_arm_env import cowa_env
 
 class PickEnv(cowa_env):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.should_regrasp = False
+    
+    def exec_cmd(self,s: Service):
+        if len(s.arg) > 0:
+            if s.arg[0] == b'terminate':
+                self.terminate = True
+                s.ret = b"terminate"
+                print("terminate")
+            elif s.arg[0] == b'success':
+                self.success_key[0] = True
+                s.ret = b"success"
+                print("success")
+            elif s.arg[0] == b'fail':
+                self.success_key[0] = False
+                s.ret = b"fail"
+                print("fail")
+            elif s.arg[0] == b'regrasp':
+                self.should_regrasp = True
+                s.ret = b"regrasp"
+                print("regrasp")
+        return s
 
     def reset(self, **kwargs):
-        self._recover()
-        self._update_currpos()
-        self._send_command(self.currpos, 95)
-        time.sleep(0.1)
-        
-        # Move above the target pose
-        target = copy.deepcopy(self.currpos)
-        target[2] = self.config.TARGET_POSE[2] + 0.05
-        self.interpolate_move(target, timeout=0.5)
-        time.sleep(0.5)
 
+        # Move above the target pose
         self._update_currpos()
         reset_pose = copy.deepcopy(self.config.TARGET_POSE)
         reset_pose[1] += 0.04
         self.interpolate_move(reset_pose, timeout=0.5)
 
         obs, info = super().reset(**kwargs)
-        self._send_gripper_command(1.0)
         time.sleep(1)
         self.success = False
         self._update_currpos()
@@ -74,7 +86,7 @@ class PickEnv(cowa_env):
             self.interpolate_move(reset_pose, timeout=1)
 
         # Change to compliance mode
-        requests.post(self.url + "update_param", json=self.config.COMPLIANCE_PARAM)
+
 
 
 class GripperPenaltyWrapper(gym.Wrapper):

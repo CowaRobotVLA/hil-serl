@@ -11,7 +11,7 @@ import pycrmw
 from msgs import wheel_pb2
 # from .cr_node_util import ThreadSafeStack, ArmStateDecoder
 # from .IK_solver_pybullet import robot_solver
-from .cr_node_util import ThreadSafeStack, ArmStateDecoder, RawImageDecoder
+from .cr_node_util import ThreadSafeStack, ArmStateDecoder, RawImageDecoder, EeposeDecoder
 # from .IK_solver_pybullet import robot_solver
 from .robot_solver_pybullet import RobotSolver
 
@@ -51,16 +51,18 @@ class ArmController:
         self.arm_state_stack = ThreadSafeStack(max_size=1)
         arm_state_decoder = ArmStateDecoder(stack=self.arm_state_stack, freq=100)
         self.ee_stack = ThreadSafeStack(max_size=1)
-        ee_decoder = ArmStateDecoder(stack = self.ee_stack, freq=100)
+        ee_decoder = EeposeDecoder(stack = self.ee_stack, freq=100)
         self.arm_state_reader = node.CreateReader("/RL/base_info/arm", arm_state_decoder)
         self.img_stack = ThreadSafeStack(5)
         img_decoder = RawImageDecoder(stack=self.img_stack, freq=30) #帧率要求大于20（发布频率）不然可能会导致漏过关键帧，导致出的图片模糊
         self.camera_reader = node.CreateReader("/camera/panorama/3/image_raw", img_decoder)
         self.eepoes_reader = node.CreateReader("/RL/base_info/arm_eepos", ee_decoder)
         self.action_writer = node.CreateWriter("/RL/action/arm", wheel_pb2.RLAction)
-        self.robot_solver = RobotSolver(urdf_path='assets/cowarm/urdf/cowa_4rad_w_arm_6dof.urdf')
+        self.robot_solver = RobotSolver(urdf_path='/home/cowa/hil-serl/serl_robot_infra/robot_env/cowarm/urdf/cowa_4rad_w_arm_6dof.urdf')
         self.update_arm_state_thread = threading.Thread(target=self._update_arm_state, daemon=True)
         self.update_arm_state_thread.start()
+        self.update_ee_state_thread = threading.Thread(target=self._update_ee_state, daemon=True)
+        self.update_ee_state_thread.start()
         self.update_arm_image_thread = threading.Thread(target=self._update_arm_image, daemon=True)
         self.update_arm_image_thread.start()
         self.pub_target_thread = threading.Thread(target=self._publish_target, daemon=True)
@@ -89,7 +91,7 @@ class ArmController:
 
     def set_ee_state(self, ee):
         with self.arm_state_lock:
-            self.ee_pose = np.array(ee['eepose'])
+            self.ee_pose = np.array(ee['ee_pose'])
 
     def set_arm_image(self, arm_image):
         with self.arm_image_lock:
@@ -180,7 +182,7 @@ class ArmController:
                 # with self.target_lock:
                 #     print("arm controller pub target: ", self.target_joints)
                 msg = self.build_msg_by_pos()
-                self.action_writer.Write(msg)
+                # self.action_writer.Write(msg)
                 # logger.info('--------------------------------------------')
                 # logger.info(f'real: {fp(self.real_joints_pos)}')
                 # logger.info(f'publ: {fp(self.target_joints)}')

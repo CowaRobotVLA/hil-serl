@@ -5,16 +5,16 @@ import numpy as np
 import pickle as pkl
 import datetime
 from absl import app, flags
-from pynput import keyboard
+# from pynput import keyboard
 
 from experiments.mappings import CONFIG_MAPPING
 
 FLAGS = flags.FLAGS
-flags.DEFINE_string("exp_name", None, "Name of experiment corresponding to folder.")
-flags.DEFINE_integer("successes_needed", 200, "Number of successful transistions to collect.")
+flags.DEFINE_string("exp_name", "cowa_pick", "Name of experiment corresponding to folder.")
+flags.DEFINE_integer("successes_needed", 1000, "Number of successful transistions to collect.")
 
 
-success_key = False
+success_key = []
 def on_press(key):
     global success_key
     try:
@@ -25,13 +25,13 @@ def on_press(key):
 
 def main(_):
     global success_key
-    listener = keyboard.Listener(
-        on_press=on_press)
-    listener.start()
+    # listener = keyboard.Listener(
+    #     on_press=on_press)
+    # listener.start()
     assert FLAGS.exp_name in CONFIG_MAPPING, 'Experiment folder not found.'
     config = CONFIG_MAPPING[FLAGS.exp_name]()
     env = config.get_environment(fake_env=False, save_video=False, classifier=False)
-
+    success_key = env.success_key
     obs, _ = env.reset()
     successes = []
     failures = []
@@ -55,10 +55,10 @@ def main(_):
             )
         )
         obs = next_obs
-        if success_key:
+        if success_key[0]:
             successes.append(transition)
             pbar.update(1)
-            success_key = False
+            # success_key = False
         else:
             failures.append(transition)
 

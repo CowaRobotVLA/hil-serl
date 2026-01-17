@@ -3,7 +3,7 @@ from scipy.spatial.transform import Rotation as R
 import gymnasium as gym
 import numpy as np
 from gym import Env
-from franka_env.utils.transformations import (
+from serl_robot_infra.robot_env.utils.transformations import (
     construct_transform_matrix,
     construct_homogeneous_matrix,
 )
@@ -75,7 +75,7 @@ class RelativeFrame(gym.Wrapper):
         using the transform matrix
         """
         transform_inv = np.linalg.inv(self.transform_matrix)
-        obs["state"]["tcp_vel"] = transform_inv @ obs["state"]["tcp_vel"]
+        # obs["state"]["tcp_vel"] = transform_inv @ obs["state"]["tcp_vel"]
 
         if self.include_relative_pose:
             T_b_o = construct_homogeneous_matrix(obs["state"]["tcp_pose"])
