@@ -10,16 +10,21 @@ def _init_replay_dict(
     obs_space: gym.Space, 
     capacity: int,
     device: torch.device
-) -> Union[torch.Tensor, dict]:
+) -> Union[torch.Tensor, DatasetDict]:
+    """Initialize replay buffer storage based on observation space"""
     if isinstance(obs_space, gym.spaces.Box):
-        return torch.empty((capacity, *obs_space.shape), dtype=torch.float32, device=device)
-        # 如果 dtype 不是 float32，可再加判断：
-        # dtype_map = {np.float32: torch.float32, np.float64: torch.float64, np.uint8: torch.uint8, ...}
+        # Initialize as numpy array first, then convert to torch tensor
+        # This is more memory efficient for large buffers
+        return torch.from_numpy(
+            np.empty((capacity, *obs_space.shape), dtype=obs_space.dtype)
+        ).to(device)
     elif isinstance(obs_space, gym.spaces.Dict):
-        return {k: _init_replay_dict(v, capacity, device) 
-                for k, v in obs_space.spaces.items()}
+        data_dict = {}
+        for k, v in obs_space.spaces.items():
+            data_dict[k] = _init_replay_dict(v, capacity, device)
+        return data_dict
     else:
-        raise TypeError(f"Unsupported space: {type(obs_space)}")
+        raise TypeError(f"Unsupported space type: {type(obs_space)}")
 
 
 def _insert_recursively(
@@ -59,8 +64,8 @@ class ReplayBuffer(Dataset):
         if next_observation_space is None:
             next_observation_space = observation_space
 
-        observation_data = _init_replay_dict(observation_space, capacity)
-        next_observation_data = _init_replay_dict(next_observation_space, capacity)
+        observation_data = _init_replay_dict(observation_space, capacity, device)
+        next_observation_data = _init_replay_dict(next_observation_space, capacity, device)
 
         # Initialize dataset dictionary with torch tensors
         dataset_dict = dict(

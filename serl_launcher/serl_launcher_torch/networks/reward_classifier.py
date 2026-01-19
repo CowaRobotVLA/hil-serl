@@ -66,6 +66,7 @@ def create_classifier(
         pretrained=True,
         num_classes=0,
         global_pool='',
+        pretrained_cfg_overlay={'file': 'resnet18/model.safetensors'}
     )
     for param in shared_backbone.parameters():
         param.requires_grad = False
