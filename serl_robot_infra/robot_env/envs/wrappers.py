@@ -26,7 +26,7 @@ class HilserlArmControllerWrapper(ArmController):
         self.update_expert_state_thread = threading.Thread(target=self._update_expert_state, daemon=True)
         self.update_expert_state_thread.start()
         self.update_expert_command_thread = threading.Thread(target=self._update_expert_action, daemon=True)
-        self.update_expert_command_thread.start()
+        # self.update_expert_command_thread.start()
         self.expert_action = None
         self.expert_state = None
 

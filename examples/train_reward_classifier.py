@@ -1,8 +1,4 @@
 import sys
-for p in sys.path:
-    if "crpilot" in p:
-        sys.path.remove(p)
-print(sys.path)
 import glob
 import os
 import pickle as pkl
@@ -24,7 +20,7 @@ from experiments.mappings import CONFIG_MAPPING
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string("exp_name", "cowa_pick", "Name of experiment corresponding to folder.")
-flags.DEFINE_integer("num_epochs", 150, "Number of training epochs.")
+flags.DEFINE_integer("num_epochs", 999, "Number of training epochs.")
 flags.DEFINE_integer("batch_size", 256, "Batch size.")
 
 
@@ -96,7 +92,7 @@ def main(_):
         torch.cuda.manual_seed(0)
     np.random.seed(0)
 
-    rng = torch.Generator(device=device)
+    rng = torch.Generator(device='cpu')
     rng.manual_seed(0)
     
     pos_sample = next(pos_iterator)
@@ -104,7 +100,7 @@ def main(_):
     sample = concat_batches(pos_sample, neg_sample, axis=0)
 
     classifier, optimizer = create_classifier(
-        sample_obs=sample["observations"], 
+        sample=sample["observations"], 
         image_keys=config.classifier_keys,
         device=device
     )
@@ -144,7 +140,8 @@ def main(_):
         logits = classifier(obs, train=True)
         
         # 计算损失
-        loss = nn.BCEWithLogitsLoss(logits, labels)
+        criterion = nn.BCEWithLogitsLoss()
+        loss = criterion(logits, labels)
         
         # 计算准确率
         preds = torch.sigmoid(logits) >= 0.5
