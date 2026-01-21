@@ -512,13 +512,13 @@ if __name__ == "__main__":
                 time.sleep(0.05)
     def test_eeposo_decoder(node):
         eepose_stack = ThreadSafeStack(10)
-        eepose_decoder = EeposeDecoder(stack=eepose_stack, freq=30)
+        eepose_decoder = EeposeDecoder(stack=eepose_stack, freq=500)
         reader = node.CreateReader("/RL/base_info/arm_eepos", eepose_decoder)
         while 1:
             flag, ee_info = eepose_stack.peek()
             if flag:
-                a = ee_info['ee_T']
-                time.sleep(0.05)
+                a = ee_info['ee_pose']
+                print(a)
 
     def test_expert_state(node):
         expert_stack = ThreadSafeStack(10)
@@ -540,7 +540,8 @@ if __name__ == "__main__":
     # test_basic_stack()
     try:
         # test_arm_state_decoder(node)
-        test_expert_state(node)
+        # test_expert_state(node)
+        test_eeposo_decoder(node)
         # test_dropQ()
     except KeyboardInterrupt:
         pycrmw.AsyncShutdown() 

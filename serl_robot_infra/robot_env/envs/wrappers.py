@@ -316,10 +316,11 @@ class SpacemouseIntervention(gym.ActionWrapper):
         expert_a = self.env.arm_controller.get_expert_action()
         self.env._update_currpos()
         delta_action = np.zeros(7)
-        delta_action[:-1] = self.compute_delta_pose(self.env.currpos, expert_a[:-1])
-        delta_action[-1] = expert_a[-1] / 50.0 - 1
+        if expert_a is not None:
+            delta_action[:-1] = self.compute_delta_pose(self.env.currpos, expert_a[:-1])
+            delta_action[-1] = expert_a[-1] / 50.0 - 1
 
-        if flag:
+        if flag["expert_state"]:
             return delta_action, True
 
         return action, False
