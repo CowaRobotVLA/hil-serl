@@ -402,7 +402,7 @@ class cowa_env(gym.Env):
         self.go_to_reset(joint_reset=joint_reset)
         self.curr_path_length = 0
 
-        time.sleep(10)
+        time.sleep(1)
         self._update_currpos()
         obs = self._get_obs()
         self.terminate = False

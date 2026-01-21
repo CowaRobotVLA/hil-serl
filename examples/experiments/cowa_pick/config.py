@@ -26,7 +26,7 @@ from experiments.cowa_pick.wrapper import PickEnv, GripperPenaltyWrapper
 class EnvConfig(DefaultEnvConfig):
     SERVER_URL: str = "http://127.0.0.2:5000/"
     IMAGE_CROP = {"panorama/3": lambda img: img}
-    TARGET_POSE = np.array([0.4,0.0,-0.1, 0, np.pi, 0])
+    TARGET_POSE = np.array([0.5,0.0,-0.1, 0, np.pi, 0])
     RESET_POSE = TARGET_POSE + np.array([0, 0, 0.2, 0, 0, 0])
     ACTION_SCALE = np.array([0.1, 0.1, 50])
     RANDOM_RESET = False
@@ -75,7 +75,7 @@ class EnvConfig(DefaultEnvConfig):
         "rotational_clip_neg_z": 0.03,
         "rotational_Ki": 0.0,
     }
-    MAX_EPISODE_LENGTH = 200
+    MAX_EPISODE_LENGTH = 300
 
 
 class TrainConfig(DefaultTrainingConfig):

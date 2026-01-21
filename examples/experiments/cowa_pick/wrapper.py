@@ -43,8 +43,8 @@ class PickEnv(cowa_env):
         arg.arg.append(cmd)
         try:
             r = rpc(arg)
-            if b'success' in r.ret:
-                print("success")
+            if b'exit_remote' in r.ret:
+                print("reset")
             return True
         except:
             return False
