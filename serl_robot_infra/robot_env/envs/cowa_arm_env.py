@@ -145,7 +145,7 @@ class cowa_env(gym.Env):
                             -np.inf, np.inf, shape=(7,)
                         ),  # xyz + quat
                         "tcp_vel": gym.spaces.Box(-np.inf, np.inf, shape=(6,)),
-                        "gripper_pose": gym.spaces.Box(-1, 1, shape=(1,)),
+                        "gripper_pose": gym.spaces.Box(0, 100, shape=(1,)),
                         "q": gym.spaces.Box(
                             -np.inf, np.inf, shape=(6,)
                         ),  # xyz + quat
@@ -241,7 +241,7 @@ class cowa_env(gym.Env):
         start_time = time.time()
         action = np.clip(action, self.action_space.low, self.action_space.high)
         xyz_delta = action[:3]
-
+        self._update_currpos()
         self.nextpos = self.currpos.copy()
         self.nextpos[:3] = self.nextpos[:3] + xyz_delta * self.action_scale[0]
 
@@ -251,8 +251,10 @@ class cowa_env(gym.Env):
             * Rotation.from_quat(self.currpos[3:])
         ).as_quat()
 
-        gripper_action = (action[6] + 1)* self.action_scale[2]
-        self._send_command(self.nextpos, gripper_action)
+        gripper_action = (action[-1] + 1)* self.action_scale[2]
+        delta_pos = [0.4, 0, -0.1, 0, 1, 0, 0]-self.nextpos
+        self._send_command(self.nextpos, gripper_action, self.q)
+        # self._send_command([0.4, 0, -0.1, 0, 1, 0, 0], gripper_action, self.q)
 
         self.curr_path_length += 1
         dt = time.time() - start_time
@@ -400,6 +402,7 @@ class cowa_env(gym.Env):
         self.go_to_reset(joint_reset=joint_reset)
         self.curr_path_length = 0
 
+        time.sleep(1)
         self._update_currpos()
         obs = self._get_obs()
         self.terminate = False
@@ -485,8 +488,8 @@ class cowa_env(gym.Env):
         """Internal function to recover the robot from error state."""
         requests.post(self.url + "clearerr")
 
-    def _send_command(self, eepos, grip_pos):
-        q = self.arm_controller.get_q_by_ee_pos(eepos[:3], eepos[3:], grip_pos)
+    def _send_command(self, eepos, grip_pos, q):
+        q = self.arm_controller.get_q_by_ee_pos(eepos[:3], eepos[3:], grip_pos, q)
         self.arm_controller.set_target(q) 
 
     def _update_currpos(self):
@@ -499,7 +502,7 @@ class cowa_env(gym.Env):
         # self.currforce = np.array(ps["force"])
         # self.currtorque = np.array(ps["torque"])
         # self.currjacobian = np.reshape(np.array(ps["jacobian"]), (6, 7))
-        self.curr_gripper_pos = self.q[0]
+        self.curr_gripper_pos = self.q[0] / 100.0 # 0~100 -> 0~1
         self.q = self.q[1:]
         self.dq = self.dq[1:]
         # self.currtorque = self.currtorque[1:]

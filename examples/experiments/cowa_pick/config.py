@@ -25,11 +25,11 @@ from experiments.cowa_pick.wrapper import PickEnv, GripperPenaltyWrapper
 
 class EnvConfig(DefaultEnvConfig):
     SERVER_URL: str = "http://127.0.0.2:5000/"
-    IMAGE_CROP = {"panorama/3": lambda img: img[50:-200, 200:-200]}
-    TARGET_POSE = np.array([0.4,0.0,-0.1, 0, np.pi/2, 0])
-    RESET_POSE = TARGET_POSE + np.array([0, 0, 0.02, 0, 0, 0])
-    ACTION_SCALE = np.array([0.015, 0.1, 1])
-    RANDOM_RESET = True
+    IMAGE_CROP = {"panorama/3": lambda img: img}
+    TARGET_POSE = np.array([0.5,0.0,-0.1, 0, np.pi, 0])
+    RESET_POSE = TARGET_POSE + np.array([0, 0, 0.2, 0, 0, 0])
+    ACTION_SCALE = np.array([0.1, 0.1, 50])
+    RANDOM_RESET = False
     DISPLAY_IMAGE = False
     RANDOM_XY_RANGE = 0.01
     RANDOM_RZ_RANGE = 0.1
@@ -75,7 +75,7 @@ class EnvConfig(DefaultEnvConfig):
         "rotational_clip_neg_z": 0.03,
         "rotational_Ki": 0.0,
     }
-    MAX_EPISODE_LENGTH = 120
+    MAX_EPISODE_LENGTH = 300
 
 
 class TrainConfig(DefaultTrainingConfig):
@@ -98,20 +98,22 @@ class TrainConfig(DefaultTrainingConfig):
         if not fake_env:
             env = SpacemouseIntervention(env)
         env = RelativeFrame(env)
-        env = Quat2EulerWrapper(env)
+        # env = Quat2EulerWrapper(env)
         env = SERLObsWrapper(env, proprio_keys=self.proprio_keys)
         env = ChunkingWrapper(env, obs_horizon=1, act_exec_horizon=None)
         if classifier:
             classifier = load_classifier_func(
                 sample=env.observation_space.sample(),
                 image_keys=self.image_keys,
-                checkpoint_path=os.path.abspath("classifier_ckpt/"),
+                checkpoint_path=os.path.abspath("classifier_ckpt/classifier.pth"),
                 device=device,
             )
 
+            # def reward_func(obs):
+            #     sigmoid = lambda x: 1 / (1 + torch.exp(-x))
+            #     return int(sigmoid(classifier(obs)) > 0.7 and obs["state"][0, 0] > 0.4)
             def reward_func(obs):
-                sigmoid = lambda x: 1 / (1 + torch.exp(-x))
-                return int(sigmoid(classifier(obs)) > 0.7 and obs["state"][0, 0] > 0.4)
+                return int(classifier(obs) > 0.5)
 
             env = MultiCameraBinaryRewardClassifierWrapper(env, reward_func)
         env = GripperPenaltyWrapper(env, penalty=-0.02)

@@ -10,7 +10,7 @@ import time
 from experiments.mappings import CONFIG_MAPPING
 
 FLAGS = flags.FLAGS
-flags.DEFINE_string("exp_name", None, "Name of experiment corresponding to folder.")
+flags.DEFINE_string("exp_name", "cowa_pick", "Name of experiment corresponding to folder.")
 flags.DEFINE_integer("successes_needed", 20, "Number of successful demos to collect.")
 
 def main(_):
@@ -28,7 +28,9 @@ def main(_):
     returns = 0
     
     while success_count < success_needed:
-        actions = np.zeros(env.action_space.sample().shape) 
+        actions = np.zeros(env.action_space.sample().shape)
+        actions[-1] = 1 
+        # print(actions)
         next_obs, rew, done, truncated, info = env.step(actions)
         returns += rew
         if "intervene_action" in info:

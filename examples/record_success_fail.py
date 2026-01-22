@@ -11,7 +11,7 @@ from experiments.mappings import CONFIG_MAPPING
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string("exp_name", "cowa_pick", "Name of experiment corresponding to folder.")
-flags.DEFINE_integer("successes_needed", 1000, "Number of successful transistions to collect.")
+flags.DEFINE_integer("successes_needed", 500, "Number of successful transistions to collect.")
 
 
 success_key = []
