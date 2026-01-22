@@ -88,15 +88,14 @@ class GraspCritic(nn.Module):
         super().__init__()
         self.network = network
         self.init_final = init_final
-        self.output_dim = output_dim
         
         # Output layer
         if init_final is not None:
-            self.output_layer = nn.Linear(network.net[-2].out_features, output_dim)
+            self.output_layer = nn.Linear(network.out_dim, output_dim)
             nn.init.uniform_(self.output_layer.weight, -init_final, init_final)
             nn.init.uniform_(self.output_layer.bias, -init_final, init_final)
         else:
-            self.output_layer = nn.Linear(network.net[-2].out_features, output_dim)
+            self.output_layer = nn.Linear(network.out_dim, output_dim)
             default_init()(self.output_layer.weight)
             
     def forward(self, observations: torch.Tensor, train: bool = False) -> torch.Tensor:
@@ -203,68 +202,79 @@ class Policy(nn.Module):
             stds = torch.nan_to_num(stds, nan=self.std_min)
         
         if self.tanh_squash_distribution and not non_squash_distribution:
-            return TanhMultivariateNormalDiag(loc=means, scale_diag=stds)
+            # return TanhMultivariateNormalDiag(loc=means, scale_diag=stds)
+            return TanhMultivariateNormalDiag(means, stds)
         else:
             return Normal(means, stds)
 
 class TanhMultivariateNormalDiag(TransformedDistribution):
-    """PyTorch version of TanhMultivariateNormalDiag"""
-    def __init__(
-        self,
-        loc: torch.Tensor,
-        scale_diag: torch.Tensor,
-        low: Optional[torch.Tensor] = None,
-        high: Optional[torch.Tensor] = None,
-    ):
-        # 创建基础分布：独立的多变量正态分布（对角协方差）
-        base_dist = Independent(Normal(loc, scale_diag), 1)
+    # """PyTorch version of TanhMultivariateNormalDiag"""
+    # def __init__(
+    #     self,
+    #     loc: torch.Tensor,
+    #     scale_diag: torch.Tensor,
+    #     low: Optional[torch.Tensor] = None,
+    #     high: Optional[torch.Tensor] = None,
+    # ):
+    #     # 创建基础分布：独立的多变量正态分布（对角协方差）
+    #     base_dist = Independent(Normal(loc, scale_diag), 1)
         
-        # 构建变换链
-        transforms = []
+    #     # 构建变换链
+    #     transforms = []
         
-        # 如果指定了low和high，添加重新缩放变换
-        if low is not None and high is not None:
-            # 计算重新缩放参数
-            scale = (high - low) / 2
-            shift = (high + low) / 2
+    #     # 如果指定了low和high，添加重新缩放变换
+    #     if low is not None and high is not None:
+    #         # 计算重新缩放参数
+    #         scale = (high - low) / 2
+    #         shift = (high + low) / 2
             
-            # 添加重新缩放变换
-            transforms.append(AffineTransform(loc=shift, scale=scale))
+    #         # 添加重新缩放变换
+    #         transforms.append(AffineTransform(loc=shift, scale=scale))
         
-        # 添加tanh变换
-        transforms.append(TanhTransform())
+    #     # 添加tanh变换
+    #     transforms.append(TanhTransform())
         
-        # 反转变换顺序（TransformedDistribution从后向前应用变换）
-        super().__init__(base_dist, list(reversed(transforms)))
+    #     # 反转变换顺序（TransformedDistribution从后向前应用变换）
+    #     super().__init__(base_dist, list(reversed(transforms)))
         
-        self.low = low
-        self.high = high
+    #     self.low = low
+    #     self.high = high
 
+    # def mode(self) -> torch.Tensor:
+    #     """返回分布的模式（众数）"""
+    #     # 对基础分布的均值应用所有变换
+    #     mode = self.base_dist.mean
+    #     for transform in reversed(self.transforms):
+    #         mode = transform(mode)
+    #     return mode
+
+    # def stddev(self) -> torch.Tensor:
+    #     """返回变换后的标准差"""
+    #     # 对基础分布的标准差应用所有变换
+    #     stddev = self.base_dist.stddev
+    #     for transform in reversed(self.transforms):
+    #         # 注意：对于非线性变换，标准差的计算是近似的
+    #         # 这里使用变换后的标准差作为近似
+    #         if isinstance(transform, TanhTransform):
+    #             # tanh变换会压缩标准差
+    #             stddev = torch.tanh(stddev)
+    #         elif isinstance(transform, AffineTransform):
+    #             # 线性变换直接应用
+    #             stddev = transform.scale * stddev
+    #     return stddev
+
+    # def sample_and_log_prob(self):
+    #     """同时采样并计算对数概率"""
+    #     samples = self.rsample()
+    #     log_probs = self.log_prob(samples)
+    #     return samples, log_probs.sum(dim=-1)
+    def __init__(self, loc: torch.Tensor, scale: torch.Tensor):
+        super().__init__(Normal(loc, scale), [TanhTransform()])
+        
     def mode(self) -> torch.Tensor:
-        """返回分布的模式（众数）"""
-        # 对基础分布的均值应用所有变换
-        mode = self.base_dist.mean
-        for transform in reversed(self.transforms):
-            mode = transform(mode)
-        return mode
-
-    def stddev(self) -> torch.Tensor:
-        """返回变换后的标准差"""
-        # 对基础分布的标准差应用所有变换
-        stddev = self.base_dist.stddev
-        for transform in reversed(self.transforms):
-            # 注意：对于非线性变换，标准差的计算是近似的
-            # 这里使用变换后的标准差作为近似
-            if isinstance(transform, TanhTransform):
-                # tanh变换会压缩标准差
-                stddev = torch.tanh(stddev)
-            elif isinstance(transform, AffineTransform):
-                # 线性变换直接应用
-                stddev = transform.scale * stddev
-        return stddev
-
+        return torch.tanh(self.base_dist.loc)
+    
     def sample_and_log_prob(self, sample_shape=torch.Size()):
-        """同时采样并计算对数概率"""
         samples = self.rsample(sample_shape)
         log_probs = self.log_prob(samples)
         return samples, log_probs.sum(dim=-1)

@@ -65,7 +65,7 @@ class PickEnv(cowa_env):
         """Move the robot to the goal position with linear interpolation."""
         if goal.shape == (6,):
             goal = np.concatenate([goal[:3], euler_2_quat(goal[3:])])
-        self._send_command(goal, 95, self.q)
+        self._send_command(goal, 5, self.q)
         time.sleep(timeout)
         self._update_currpos()
     
@@ -75,14 +75,12 @@ class PickEnv(cowa_env):
         implemented each subclass for the specific task.
         Should override this method if custom reset procedure is needed.
         """
+        # step1: close gripper
+        self._update_currpos()
+        self._send_command(self.currpos, 5, self.q)
+        time.sleep(0.5)
 
-        # Perform joint reset if needed
-        # if joint_reset:
-        #     print("JOINT RESET")
-        #     requests.post(self.url + "jointreset")
-        #     time.sleep(0.5)
-
-        # Perform Carteasian reset
+        # step2: reset pose
         if self.randomreset:  # randomize reset position in xy plane
             reset_pose = self.resetpos.copy()
             reset_pose[:2] += np.random.uniform(
@@ -96,11 +94,10 @@ class PickEnv(cowa_env):
             self.interpolate_move(reset_pose, timeout=1)
         else:
             reset_pose = self.resetpos.copy()
-            self.interpolate_move(reset_pose, timeout=0.1)
-
-        # Change to compliance mode
-
-
+            self.interpolate_move(reset_pose, timeout=0.5)
+        # step3: open gripper
+        self._update_currpos()
+        self._send_command(self.currpos, 95, self.q)
 
 class GripperPenaltyWrapper(gym.Wrapper):
     def __init__(self, env, penalty=-0.05):
@@ -111,7 +108,7 @@ class GripperPenaltyWrapper(gym.Wrapper):
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
-        self.last_gripper_pos = obs["state"][0, 0]
+        self.last_gripper_pos = obs["state"][0, 6]
         return obs, info
 
     def step(self, action):
@@ -120,8 +117,8 @@ class GripperPenaltyWrapper(gym.Wrapper):
         if "intervene_action" in info:
             action = info["intervene_action"]
 
-        if (action[-1] < -0.5 and self.last_gripper_pos > 50) or (
-            action[-1] > 0.5 and self.last_gripper_pos < 50
+        if (action[-1] < -0.5 and self.last_gripper_pos > 0.5) or (
+            action[-1] > 0.5 and self.last_gripper_pos < 0.5
         ):
             info["grasp_penalty"] = self.penalty
         else:

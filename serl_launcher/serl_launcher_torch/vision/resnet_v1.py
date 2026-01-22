@@ -62,10 +62,11 @@ class PreTrainedResNetEncoder(nn.Module):
             self.backbone = shared_backbone
         else:
             self.backbone = timm.create_model(
-                model_name,
-                pretrained=pretrained,
-                num_classes=0,  # Remove classifier
-                global_pool='',  # Remove global pooling to keep spatial dims
+                'resnet18',
+                pretrained=True,
+                num_classes=0,
+                global_pool='',
+                pretrained_cfg_overlay={'file': 'resnet18/model.safetensors'}
             )
             
             if freeze_backbone:

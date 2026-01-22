@@ -3,12 +3,12 @@ import torch.nn as nn
 
 from agentlace.trainer import TrainerConfig
 
-from serl_launcher_torch.common.typing import Batch, PRNGKey
+# from serl_launcher_torch.common.typing import Batch, PRNGKey
 from serl_launcher_torch.common.wandb import WandBLogger
-from serl_launcher_torch.agents.continuous.bc import BCAgent
+# from serl_launcher_torch.agents.continuous.bc import BCAgent
 from serl_launcher_torch.agents.continuous.sac import SACAgent
 from serl_launcher_torch.agents.continuous.sac_hybrid_single import SACAgentHybridSingleArm
-from serl_launcher_torch.agents.continuous.sac_hybrid_dual import SACAgentHybridDualArm
+# from serl_launcher_torch.agents.continuous.sac_hybrid_dual import SACAgentHybridDualArm
 from serl_launcher_torch.vision.data_augmentations import batched_random_crop
 
 ##############################################################################
@@ -87,17 +87,17 @@ def make_sac_pixel_agent_hybrid_single_arm(
             "std_max": 5,
         },
         critic_network_kwargs={
-            "activations": nn.tanh,
+            "activations": nn.Tanh,
             "use_layer_norm": True,
             "hidden_dims": [256, 256],
         },
         grasp_critic_network_kwargs={
-            "activations": nn.tanh,
+            "activations": nn.Tanh,
             "use_layer_norm": True,
             "hidden_dims": [256, 256],
         },
         policy_network_kwargs={
-            "activations": nn.tanh,
+            "activations": nn.Tanh,
             "use_layer_norm": True,
             "hidden_dims": [256, 256],
         },
@@ -234,7 +234,7 @@ def _unpack(batch: dict, image_keys: tuple) -> dict:
     return batch
 
 
-def make_trainer_config(port_number: int = 5588, broadcast_port: int = 5589) -> TrainerConfig:
+def make_trainer_config(port_number: int = 1234, broadcast_port: int = 2233) -> TrainerConfig:
     return TrainerConfig(
         port_number=port_number,
         broadcast_port=broadcast_port,

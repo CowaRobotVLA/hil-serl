@@ -45,8 +45,8 @@ FLAGS = flags.FLAGS
 
 flags.DEFINE_string("exp_name", "cowa_pick", "Name of experiment corresponding to folder.")
 flags.DEFINE_integer("seed", 42, "Random seed.")
-flags.DEFINE_boolean("learner", False, "Whether this is a learner.")
-flags.DEFINE_boolean("actor", True, "Whether this is an actor.")
+flags.DEFINE_boolean("learner", True, "Whether this is a learner.")
+flags.DEFINE_boolean("actor", False, "Whether this is an actor.")
 flags.DEFINE_string("ip", "localhost", "IP address of the learner.")
 flags.DEFINE_multi_string("demo_path", "demo_data/cowa_pick_20_demos_2026-01-21_18-12-29.pkl", "Path to the demo data.")
 flags.DEFINE_string("checkpoint_path", "rlpd_ckpt", "Path to save checkpoints.")

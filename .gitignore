@@ -3,3 +3,5 @@
 *.tar.gz
 *.pth
 *.mp4
+logs
+*.logs

@@ -33,8 +33,8 @@ class EnvConfig(DefaultEnvConfig):
     DISPLAY_IMAGE = False
     RANDOM_XY_RANGE = 0.01
     RANDOM_RZ_RANGE = 0.1
-    ABS_POSE_LIMIT_HIGH = TARGET_POSE + np.array([0.03, 0.06, 0.05, 0.1, 0.1, 0.3])
-    ABS_POSE_LIMIT_LOW = TARGET_POSE - np.array([0.03, 0.01, 0.03, 0.1, 0.1, 0.3])
+    ABS_POSE_LIMIT_HIGH = TARGET_POSE + np.array([0.1, 0.1, 0.3, 0.2, 0.2, 0.3])
+    ABS_POSE_LIMIT_LOW = TARGET_POSE - np.array([0.1, 0.05, 0.2, 0.2, 0.2, 0.3])
     COMPLIANCE_PARAM = {
         "translational_stiffness": 2000,
         "translational_damping": 89,
@@ -87,7 +87,7 @@ class TrainConfig(DefaultTrainingConfig):
     random_steps = 0
     discount = 0.98
     buffer_period = 1000
-    encoder_type = "resnet-pretrained"
+    encoder_type = "resnet18-pretrained"
     setup_mode = "single-arm-learned-gripper"
     # "single-arm-learned-gripper"  # "single-arm-fixed-gripper"
 
@@ -109,11 +109,11 @@ class TrainConfig(DefaultTrainingConfig):
                 device=device,
             )
 
-            # def reward_func(obs):
-            #     sigmoid = lambda x: 1 / (1 + torch.exp(-x))
-            #     return int(sigmoid(classifier(obs)) > 0.7 and obs["state"][0, 0] > 0.4)
             def reward_func(obs):
-                return int(classifier(obs) > 0.5)
+                sigmoid = lambda x: 1 / (1 + torch.exp(-x))
+                return int(sigmoid(classifier(obs)) > 0.7 and obs["state"][0, 6] < 0.6)
+            # def reward_func(obs):
+            #     return int(classifier(obs) > 0.5)
 
             env = MultiCameraBinaryRewardClassifierWrapper(env, reward_func)
         env = GripperPenaltyWrapper(env, penalty=-0.02)
