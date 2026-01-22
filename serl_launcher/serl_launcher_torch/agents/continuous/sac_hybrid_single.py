@@ -1,12 +1,12 @@
 from functools import partial
-from typing import Iterable, Optional, Tuple, FrozenSet
+from typing import Iterable, Optional, Tuple, FrozenSet, Dict, Callable
 
-import chex
-import distrax
-import flax
-import flax.linen as nn
-import jax
-import jax.numpy as jnp
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from copy import deepcopy
+from torch.amp import autocast, GradScaler
 
 from serl_launcher_torch.common.common import JaxRLTrainState, ModuleDict, nonpytree_field
 from serl_launcher_torch.common.encoding import EncodingWrapper
@@ -18,7 +18,7 @@ from serl_launcher_torch.networks.mlp import MLP
 from serl_launcher_torch.utils.train_utils import _unpack
 
 
-class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
+class SACAgentHybridSingleArm:
     """
     Online actor-critic supporting several different algorithms depending on configuration:
      - SAC (default)
@@ -535,35 +535,28 @@ class SACAgentHybridSingleArm(flax.struct.PyTreeNode):
     @classmethod
     def create_pixels(
         cls,
-        rng: PRNGKey,
-        observations: Data,
-        actions: jnp.ndarray,
+        sample_obs: Dict[str, torch.Tensor],
+        sample_action: torch.Tensor,
         # Model architecture
-        encoder_type: str = "resnet-pretrained",
+        encoder_type: str = "resnet18-pretrained",
         use_proprio: bool = False,
-        critic_network_kwargs: dict = {
-            "hidden_dims": [256, 256],
-        },
-        grasp_critic_network_kwargs: dict = {
-            "hidden_dims": [128, 128],
-        },
-        policy_network_kwargs: dict = {
-            "hidden_dims": [256, 256],
-        },
-        policy_kwargs: dict = {
-            "tanh_squash_distribution": True,
-            "std_parameterization": "uniform",
-        },
+        critic_network_kwargs: dict = None,
+        grasp_critic_network_kwargs: dict = None,
+        policy_network_kwargs: dict = None,
+        policy_kwargs: dict = None,
         critic_ensemble_size: int = 2,
         critic_subsample_size: Optional[int] = None,
-        temperature_init: float = 1.0,
+        temperature_init: float = 1e-2,
         image_keys: Iterable[str] = ("image",),
-        augmentation_function: Optional[callable] = None,
+        augmentation_function: Optional[Callable] = None,
+        reward_bias: float = 0.0,
+        image_size: Tuple[int, int] = (128, 128),
         **kwargs,
-    ):
+    )-> "SACAgentHybridSingleArm":
         """
         Create a new pixel-based agent, with no encoders.
         """
+        image_keys = tuple(image_keys)
 
         policy_network_kwargs["activate_final"] = True
         critic_network_kwargs["activate_final"] = True

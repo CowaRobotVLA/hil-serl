@@ -10,9 +10,10 @@ from torch.amp import autocast, GradScaler
 
 from serl_launcher_torch.common.common import JaxRLTrainState, ModuleDict, nonpytree_field
 from serl_launcher_torch.common.encoding import EncodingWrapper
+from serl_launcher.vision.resnet_v1 import create_encoder
 from serl_launcher_torch.common.optimizers import make_optimizer
 from serl_launcher_torch.common.typing import Batch, Data, Params, PRNGKey
-from serl_launcher_torch.networks.actor_critic_nets import Critic, Policy, ensemblize
+from serl_launcher_torch.networks.actor_critic_nets import Critic, Policy, CriticEnsemble
 from serl_launcher_torch.networks.lagrange import GeqLagrangeMultiplier
 from serl_launcher_torch.networks.mlp import MLP
 from serl_launcher_torch.utils.train_utils import _unpack

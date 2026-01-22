@@ -1,35 +1,43 @@
 #!/usr/bin/env python3
+import warnings
+warnings.filterwarnings("ignore")
+
+import logging
+logging.getLogger('asyncio').setLevel(logging.ERROR)
 
 import glob
 import time
-import torch
 import numpy as np
 import tqdm
 from absl import app, flags
-from flax.training import checkpoints
+
 import os
 import copy
+from typing import Optional
 import pickle as pkl
 from gymnasium.wrappers.record_episode_statistics import RecordEpisodeStatistics
 from natsort import natsorted
 
+import torch
+from torch.utils.tensorboard import SummaryWriter
+
 from serl_launcher.serl_launcher_torch.agents.continuous.sac import SACAgent
 from serl_launcher.serl_launcher_torch.agents.continuous.sac_hybrid_single import SACAgentHybridSingleArm
-from serl_launcher.serl_launcher_torch.agents.continuous.sac_hybrid_dual import SACAgentHybridDualArm
+# from serl_launcher.serl_launcher_torch.agents.continuous.sac_hybrid_dual import SACAgentHybridDualArm
 from serl_launcher.serl_launcher_torch.utils.timer_utils import Timer
 from serl_launcher.serl_launcher_torch.utils.train_utils import concat_batches, state_dict_to_numpy, numpy_to_state_dict, print_green
 
 from agentlace.trainer import TrainerServer, TrainerClient
 from agentlace.data.data_store import QueuedDataStore
 
+from serl_launcher.serl_launcher_torch.data.data_store import MemoryEfficientReplayBufferDataStore
 from serl_launcher.serl_launcher_torch.utils.launcher import (
     make_sac_pixel_agent,
-    # make_sac_pixel_agent_hybrid_single_arm,
+    make_sac_pixel_agent_hybrid_single_arm,
     # make_sac_pixel_agent_hybrid_dual_arm,
     make_trainer_config,
-    make_wandb_logger,
+    # make_wandb_logger,
 )
-from serl_launcher.serl_launcher_torch.data.data_store import MemoryEfficientReplayBufferDataStore
 
 from experiments.mappings import CONFIG_MAPPING
 
@@ -46,11 +54,7 @@ flags.DEFINE_string("checkpoint_path", None, "Path to save checkpoints.")
 # flags.DEFINE_integer("eval_n_trajs", 0, "Number of trajectories to evaluate.")
 flags.DEFINE_boolean("save_video", False, "Save video.")
 flags.DEFINE_boolean("use_classifier", True, "Use classifier to compute reward.")
-
-flags.DEFINE_boolean(
-    "debug", False, "Debug mode."
-)  # debug mode will disable wandb logging
-
+flags.DEFINE_boolean("debug", False, "Debug mode.")  # debug mode will disable wandb logging
 
 def actor(agent: SACAgent, data_store, intvn_data_store, env, device: str = "cuda"):
     """
@@ -140,7 +144,7 @@ def actor(agent: SACAgent, data_store, intvn_data_store, env, device: str = "cud
     intervention_count = 0
     intervention_steps = 0
 
-    pbar = tqdm.tqdm(range(start_step, config.max_steps), dynamic_ncols=True)
+    pbar = tqdm.tqdm(range(config.max_steps, config.max_steps), dynamic_ncols=True)
     for step in pbar:
         timer.tick("total")
 
@@ -148,22 +152,26 @@ def actor(agent: SACAgent, data_store, intvn_data_store, env, device: str = "cud
             if step < config.random_steps:
                 actions = env.action_space.sample()
             else:
-                sampling_rng, key = jax.random.split(sampling_rng)
-                actions = agent.sample_actions(
-                    observations=jax.device_put(obs),
-                    seed=key,
-                    argmax=False,
-                )
-                actions = np.asarray(jax.device_get(actions))
+                with torch.no_grad():
+                    obs_tensor = {
+                            k: torch.as_tensor(v, device=device) 
+                            for k, v in obs.items()
+                        }
+                    actions = agent.sample_actions(
+                        observations=obs_tensor,
+                        argmax=False,
+                    )
+                actions = actions.cpu().numpy()
 
         # Step environment
         with timer.context("step_env"):
-
             next_obs, reward, done, truncated, info = env.step(actions)
-            if "left" in info:
-                info.pop("left")
-            if "right" in info:
-                info.pop("right")
+            reward = np.asarray(reward, dtype=np.float32)
+
+            # if "left" in info:
+            #     info.pop("left")
+            # if "right" in info:
+            #     info.pop("right")
 
             # override the action with the intervention action
             if "intervene_action" in info:
@@ -176,6 +184,7 @@ def actor(agent: SACAgent, data_store, intvn_data_store, env, device: str = "cud
                 already_intervened = False
 
             running_return += reward
+
             transition = dict(
                 observations=obs,
                 actions=actions,
@@ -184,18 +193,23 @@ def actor(agent: SACAgent, data_store, intvn_data_store, env, device: str = "cud
                 masks=1.0 - done,
                 dones=done,
             )
+
             if 'grasp_penalty' in info:
                 transition['grasp_penalty']= info['grasp_penalty']
+            # All data goes into replay buffer
             data_store.insert(transition)
+
             transitions.append(copy.deepcopy(transition))
             if already_intervened:
                 intvn_data_store.insert(transition)
-                demo_transitions.append(copy.deepcopy(transition))
+                # demo_transitions.append(copy.deepcopy(transition))
 
             obs = next_obs
             if done or truncated:
-                info["episode"]["intervention_count"] = intervention_count
-                info["episode"]["intervention_steps"] = intervention_steps
+                if "episode" in info:
+                    info["episode"]["intervention_count"] = intervention_count
+                    info["episode"]["intervention_steps"] = intervention_steps
+
                 stats = {"environment": info}  # send stats to the learner to log
                 client.request("send-stats", stats)
                 pbar.set_description(f"last return: {running_return}")
@@ -233,23 +247,27 @@ def actor(agent: SACAgent, data_store, intvn_data_store, env, device: str = "cud
 ##############################################################################
 
 
-def learner(rng, agent, replay_buffer, demo_buffer, wandb_logger=None):
-    """
-    The learner loop, which runs when "--learner" is set to True.
-    """
-    start_step = (
-        int(os.path.basename(checkpoints.latest_checkpoint(os.path.abspath(FLAGS.checkpoint_path)))[11:])
-        + 1
-        if FLAGS.checkpoint_path and os.path.exists(FLAGS.checkpoint_path)
-        else 0
-    )
-    step = start_step
+def learner(agent: SACAgent, 
+            replay_buffer: MemoryEfficientReplayBufferDataStore,
+            demo_buffer: Optional[MemoryEfficientReplayBufferDataStore] = None,
+            device: str = "cuda"):
+    agent.train()
+
+    # 创建TensorBoard日志目录
+    log_dir = os.path.join(FLAGS.checkpoint_path, "logs") if FLAGS.checkpoint_path else "./logs"
+    os.makedirs(log_dir, exist_ok=True)
+    tb_logger = SummaryWriter(log_dir=log_dir)
+
+    step = 0
 
     def stats_callback(type: str, payload: dict) -> dict:
         """Callback for when server receives stats request."""
         assert type == "send-stats", f"Invalid request type: {type}"
-        if wandb_logger is not None:
-            wandb_logger.log(payload, step=step)
+        if "environment" in payload and "episode" in payload["environment"]:
+            episode_info = payload["environment"]["episode"]
+            for key, value in episode_info.items():
+                if isinstance(value, (int, float)):
+                    tb_logger.add_scalar(f"environment/{key}", value, step)
         return {}  # not expecting a response
 
     # Create server
@@ -273,27 +291,35 @@ def learner(rng, agent, replay_buffer, demo_buffer, wandb_logger=None):
     pbar.close()
 
     # send the initial network to the actor
-    server.publish_network(agent.state.params)
+    server.publish_network(state_dict_to_numpy(agent.state_dict()))
     print_green("sent initial network to actor")
 
     # 50/50 sampling from RLPD, half from demo and half from online experience
+    if demo_buffer:
+        single_buffer_batch_size = config.batch_size // 2
+        demo_iterator = demo_buffer.get_iterator(
+        sample_args={
+            "batch_size": single_buffer_batch_size,
+            "pack_obs_and_next_obs": True,
+        },
+        device=device)
+    else:
+        single_buffer_batch_size = config.batch_size
+        demo_iterator = None
+
     replay_iterator = replay_buffer.get_iterator(
         sample_args={
-            "batch_size": config.batch_size // 2,
+            "batch_size": single_buffer_batch_size,
             "pack_obs_and_next_obs": True,
         },
-        device=sharding.replicate(),
-    )
-    demo_iterator = demo_buffer.get_iterator(
-        sample_args={
-            "batch_size": config.batch_size // 2,
-            "pack_obs_and_next_obs": True,
-        },
-        device=sharding.replicate(),
+        device=device,
     )
 
     # wait till the replay buffer is filled with enough data
     timer = Timer()
+
+    pbar = tqdm.tqdm(total=config.replay_buffer_capacity,
+                     initial=len(replay_buffer), desc="replay buffer")
     
     if isinstance(agent, SACAgent):
         train_critic_networks_to_update = frozenset({"critic"})
@@ -303,49 +329,66 @@ def learner(rng, agent, replay_buffer, demo_buffer, wandb_logger=None):
         train_networks_to_update = frozenset({"critic", "grasp_critic", "actor", "temperature"})
 
     for step in tqdm.tqdm(
-        range(start_step, config.max_steps), dynamic_ncols=True, desc="learner"
+        range(config.max_steps), dynamic_ncols=True, desc="learner"
     ):
         # run n-1 critic updates and 1 critic + actor update.
         # This makes training on GPU faster by reducing the large batch transfer time from CPU to GPU
-        for critic_step in range(config.cta_ratio - 1):
+        for _ in range(config.cta_ratio - 1):
             with timer.context("sample_replay_buffer"):
                 batch = next(replay_iterator)
-                demo_batch = next(demo_iterator)
-                batch = concat_batches(batch, demo_batch, axis=0)
+                if demo_iterator:
+                    demo_batch = next(demo_iterator)
+                    batch = concat_batches(batch, demo_batch, axis=0)
 
             with timer.context("train_critics"):
-                agent, critics_info = agent.update(
-                    batch,
-                    networks_to_update=train_critic_networks_to_update,
-                )
+                agent.update(batch, networks_to_update=train_critic_networks_to_update)
 
         with timer.context("train"):
             batch = next(replay_iterator)
-            demo_batch = next(demo_iterator)
-            batch = concat_batches(batch, demo_batch, axis=0)
-            agent, update_info = agent.update(
-                batch,
-                networks_to_update=train_networks_to_update,
+            if demo_iterator:
+                demo_batch = next(demo_iterator)
+                batch = concat_batches(batch, demo_batch, axis=0)
+            
+            update_info = agent.update(batch, 
+                networks_to_update=frozenset(train_networks_to_update)
             )
+
         # publish the updated network
         if step > 0 and step % (config.steps_per_update) == 0:
-            agent = jax.block_until_ready(agent)
-            server.publish_network(agent.state.params)
+            torch.cuda.synchronize()
+            with torch.no_grad():
+                state_dict = agent.state_dict()
+                numpy_params = state_dict_to_numpy(state_dict)
+            server.publish_network(numpy_params)
+            del state_dict, numpy_params
+            torch.cuda.empty_cache()
 
-        if step % config.log_period == 0 and wandb_logger:
-            wandb_logger.log(update_info, step=step)
-            wandb_logger.log({"timer": timer.get_average_times()}, step=step)
+        if step % config.log_period == 0:
+            # 记录训练信息到TensorBoard
+            for key, value in update_info.items():
+                if isinstance(value, (int, float)):
+                    tb_logger.add_scalar(f"train/{key}", value, step)
+            
+            # 记录计时器信息到TensorBoard
+            timer_stats = timer.get_average_times()
+            for key, value in timer_stats.items():
+                if isinstance(value, (int, float)):
+                    tb_logger.add_scalar(f"timer/{key}", value, step)
 
-        if (
-            step > 0
-            and config.checkpoint_period
-            and step % config.checkpoint_period == 0
-        ):
-            checkpoints.save_checkpoint(
-                os.path.abspath(FLAGS.checkpoint_path), agent.state, step=step, keep=100
-            )
+        if step > 0 and config.checkpoint_period and step % config.checkpoint_period == 0:
+            assert FLAGS.checkpoint_path is not None
+            os.makedirs(FLAGS.checkpoint_path, exist_ok=True)
+            checkpoint_file = os.path.join(FLAGS.checkpoint_path, f"checkpoint_{step}.pt")
+            with torch.no_grad():
+                torch.save({'step': step, 'model_state_dict': agent.state_dict()}, checkpoint_file)
+            print_green(f"Saved checkpoint to {checkpoint_file}")
+            torch.cuda.empty_cache()
 
-
+        pbar.update(len(replay_buffer) - pbar.n)
+        step += 1
+    
+    # 关闭TensorBoard写入器
+    tb_logger.close()
 ##############################################################################
 
 
@@ -379,16 +422,16 @@ def main(_):
             discount=config.discount,
         )
         include_grasp_penalty = False
-    # elif config.setup_mode == 'single-arm-learned-gripper':
-    #     agent: SACAgentHybridSingleArm = make_sac_pixel_agent_hybrid_single_arm(
-    #         seed=FLAGS.seed,
-    #         sample_obs=env.observation_space.sample(),
-    #         sample_action=env.action_space.sample(),
-    #         image_keys=config.image_keys,
-    #         encoder_type=config.encoder_type,
-    #         discount=config.discount,
-    #     )
-    #     include_grasp_penalty = True
+    elif config.setup_mode == 'single-arm-learned-gripper':
+        agent: SACAgentHybridSingleArm = make_sac_pixel_agent_hybrid_single_arm(
+            seed=FLAGS.seed,
+            sample_obs=env.observation_space.sample(),
+            sample_action=env.action_space.sample(),
+            image_keys=config.image_keys,
+            encoder_type=config.encoder_type,
+            discount=config.discount,
+        )
+        include_grasp_penalty = True
     # elif config.setup_mode == 'dual-arm-learned-gripper':
     #     agent: SACAgentHybridDualArm = make_sac_pixel_agent_hybrid_dual_arm(
     #         seed=FLAGS.seed,
@@ -399,7 +442,7 @@ def main(_):
     #         discount=config.discount,
     #     )
     #     include_grasp_penalty = True
-    # else:
+    else:
         raise NotImplementedError(f"Unknown setup mode: {config.setup_mode}")
 
     # replicate agent across devices
@@ -423,7 +466,7 @@ def main(_):
             env.action_space,
             capacity=config.replay_buffer_capacity,
             image_keys=config.image_keys,
-            include_grasp_penalty=False,
+            include_grasp_penalty=include_grasp_penalty,
             device="cpu"
         )
         
@@ -432,7 +475,7 @@ def main(_):
             env.action_space,
             capacity=config.replay_buffer_capacity,
             image_keys=config.image_keys,
-            include_grasp_penalty=False,
+            include_grasp_penalty=include_grasp_penalty,
             device="cpu",
         )
         print_green("replay buffer created")
