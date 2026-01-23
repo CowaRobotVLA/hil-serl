@@ -58,6 +58,25 @@ class PickEnv(cowa_env):
         # self.interpolate_move(reset_pose, timeout=0.5)
 
         obs, info = super().reset(**kwargs)
+        # 等待用户输入
+        flag = False
+        while flag:
+            user_input = input("are you ready to next round ^_^ (n=下一轮, w=再等等, q=退出): ").strip().lower()
+            
+            if user_input == 'n':
+                flag = True
+                print("gogogo")
+                break
+            elif user_input == 'w':
+                print("wait a monent")
+                continue
+            elif user_input == 'q':
+                flag = True
+                self.terminate = True
+                break
+            else:
+                print("无效输入，请输入 w, q 或 n")
+        obs = self._get_obs()
         self.success = False
         return obs, info
     
@@ -91,7 +110,7 @@ class PickEnv(cowa_env):
                 -self.random_rz_range, self.random_rz_range
             )
             reset_pose[3:] = euler_2_quat(euler_random)
-            self.interpolate_move(reset_pose, timeout=1)
+            self.interpolate_move(reset_pose, timeout=2)
         else:
             reset_pose = self.resetpos.copy()
             self.interpolate_move(reset_pose, timeout=0.5)

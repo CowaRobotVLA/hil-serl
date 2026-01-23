@@ -8,7 +8,7 @@ import cv2
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string("exp_name", "cowa_pick", "Name of experiment corresponding to folder.")
-flags.DEFINE_string("data_file", "cowa_pick_500_success_images_2026-01-19_14-28-26.pkl", "Path to the data file to replay.")
+flags.DEFINE_string("data_file", "cowa_pick_1000_success_images_2026-01-22_20-07-40.pkl", "Path to the data file to replay.")
 flags.DEFINE_string("output_dir", "./replay_images", "Directory to save extracted images.")
 flags.DEFINE_boolean("save_video", True, "Whether to save images as a video.")
 flags.DEFINE_integer("fps", 10, "Frames per second for video.")

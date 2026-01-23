@@ -75,7 +75,7 @@ class EnvConfig(DefaultEnvConfig):
         "rotational_clip_neg_z": 0.03,
         "rotational_Ki": 0.0,
     }
-    MAX_EPISODE_LENGTH = 300
+    MAX_EPISODE_LENGTH = 30000
 
 
 class TrainConfig(DefaultTrainingConfig):
