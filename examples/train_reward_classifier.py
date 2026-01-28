@@ -20,7 +20,7 @@ from experiments.mappings import CONFIG_MAPPING
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string("exp_name", "cowa_pick", "Name of experiment corresponding to folder.")
-flags.DEFINE_integer("num_epochs", 999, "Number of training epochs.")
+flags.DEFINE_integer("num_epochs", 9999, "Number of training epochs.")
 flags.DEFINE_integer("batch_size", 256, "Batch size.")
 
 
@@ -28,7 +28,7 @@ def main(_):
     # print(FLAGS.exp_name)
     assert FLAGS.exp_name in CONFIG_MAPPING, 'Experiment folder not found.'
     config = CONFIG_MAPPING[FLAGS.exp_name]()
-    env = config.get_environment(fake_env=True, save_video=False, classifier=False)
+    env = config.get_environment(fake_env=True, save_video=False, classifier=False, record_classifier_data = False)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")

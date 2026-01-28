@@ -12,9 +12,11 @@ from serl_robot_infra.robot_env.envs.cowa_arm_env import cowa_env
 
 class PickEnv(cowa_env):
     def __init__(self, **kwargs):
+        self.record_classifier_data = kwargs.pop('record_classifier_data', False)
         super().__init__(**kwargs)
         self.should_regrasp = False
-    
+        self.go_next_round = False
+        self.remote_flag = False
     def exec_cmd(self,s: Service):
         if len(s.arg) > 0:
             if s.arg[0] == b'terminate':
@@ -22,17 +24,35 @@ class PickEnv(cowa_env):
                 s.ret = b"terminate"
                 print("terminate")
             elif s.arg[0] == b'success':
-                self.success_key[0] = True
-                s.ret = b"success"
-                print("success")
+                if self.record_classifier_data:
+                    self.success_key[0] = True
+                    s.ret = b"success"
+                    print("success")
+                else:
+                    self.success = True
             elif s.arg[0] == b'fail':
-                self.success_key[0] = False
-                s.ret = b"fail"
-                print("fail")
+                if self.record_classifier_data:
+                    self.success_key[0] = False
+                    s.ret = b"fail"
+                    print("fail")
+                else:
+                    self.terminate = True
             elif s.arg[0] == b'regrasp':
                 self.should_regrasp = True
                 s.ret = b"regrasp"
                 print("regrasp")
+            elif s.arg[0] == b'next':
+                self.go_next_round = True
+                s.ret = b"next"
+                print('next round')
+            elif s.arg[0] == b'remote':
+                self.remote_flag = True
+                s.ret = b"remote"
+                print("go expert")
+            elif s.arg[0] == b'exit_remote':
+                self.remote_flag = False
+                s.ret = b"exit_remote"
+                print("go policy")
         return s
     # rpc
     def RpcRequest(self,cmd):
@@ -52,32 +72,21 @@ class PickEnv(cowa_env):
 
         # Move above the target pose
         self._update_currpos()
-        test = self.RpcRequest(b'exit_remote')
+        self.remote_flag = False
         # reset_pose = copy.deepcopy(self.config.TARGET_POSE)
         # reset_pose[2] += 0.2
         # self.interpolate_move(reset_pose, timeout=0.5)
-
+        self.success_key[0] = False
         obs, info = super().reset(**kwargs)
         # 等待用户输入
-        flag = False
-        while flag:
-            user_input = input("are you ready to next round ^_^ (n=下一轮, w=再等等, q=退出): ").strip().lower()
-            
-            if user_input == 'n':
-                flag = True
-                print("gogogo")
-                break
-            elif user_input == 'w':
-                print("wait a monent")
-                continue
-            elif user_input == 'q':
-                flag = True
-                self.terminate = True
-                break
-            else:
-                print("无效输入，请输入 w, q 或 n")
+        self.go_next_round = False
+        print("wait cmd to next round")
+        while self.go_next_round == False:
+            time.sleep(0.01)
         obs = self._get_obs()
         self.success = False
+        self.terminate = False 
+
         return obs, info
     
     def interpolate_move(self, goal: np.ndarray, timeout: float):
@@ -113,7 +122,7 @@ class PickEnv(cowa_env):
             self.interpolate_move(reset_pose, timeout=2)
         else:
             reset_pose = self.resetpos.copy()
-            self.interpolate_move(reset_pose, timeout=0.5)
+            self.interpolate_move(reset_pose, timeout=1.0)
         # step3: open gripper
         self._update_currpos()
         self._send_command(self.currpos, 95, self.q)

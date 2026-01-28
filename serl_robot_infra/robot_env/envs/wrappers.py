@@ -10,7 +10,7 @@ from scipy.spatial.transform import Rotation as R
 from typing import List
 import threading
 from serl_robot_infra.robot_env.utils.arm_controller import ArmController
-from serl_robot_infra.robot_env.utils.cr_node_util import ThreadSafeStack, LeaderCommandDecoder, ExpertStateDecoder
+from serl_robot_infra.robot_env.utils.cr_node_util import ThreadSafeStack, LeaderArmStateDecoder
 
 sigmoid = lambda x: 1 / (1 + np.exp(-x))
 
@@ -18,15 +18,13 @@ class HilserlArmControllerWrapper(ArmController):
     def __init__(self, node, dof_num, control_mode = "vel", receive_interval=0.002, publish_interval=0.01, timeout_interval=0.2):
         super().__init__(node, dof_num, control_mode, receive_interval, publish_interval, timeout_interval)
         self.expert_command_stack = ThreadSafeStack(max_size=1)
-        expert_command_decoder = LeaderCommandDecoder(stack=self.expert_command_stack, freq=20)
-        self.expert_command_reader = node.CreateReader("/gr/control", expert_command_decoder)
+        expert_command_decoder = LeaderArmStateDecoder(stack=self.expert_command_stack, freq=20)
+        self.expert_command_reader = node.CreateReader("/RL/base_info/leader_arm", expert_command_decoder)
         self.expert_state_stack = ThreadSafeStack(max_size=1)
-        expert_state_decoder = ExpertStateDecoder(stack=self.expert_state_stack, freq=100)
-        self.expert_state_reader = node.CreateReader("/motor_info/arm", expert_state_decoder)
-        self.update_expert_state_thread = threading.Thread(target=self._update_expert_state, daemon=True)
-        self.update_expert_state_thread.start()
         self.update_expert_command_thread = threading.Thread(target=self._update_expert_action, daemon=True)
-        # self.update_expert_command_thread.start()
+        self.update_expert_command_thread.start()
+        self.last_actor_action = None
+
         self.expert_action = None
         self.expert_state = None
 
@@ -36,7 +34,7 @@ class HilserlArmControllerWrapper(ArmController):
             while not flag:
                 time.sleep(0.01)
                 flag, expert_action = self.expert_command_stack.pop()
-            self.set_expert_action(expert_action["expert_action"])
+            self.set_expert_action(expert_action["joints_pos"])
             time.sleep(1/30)
     
     def set_expert_action(self, expert_action):
@@ -312,17 +310,21 @@ class SpacemouseIntervention(gym.ActionWrapper):
         Output:
         - action: spacemouse action if nonezero; else, policy action
         """
-        flag = self.env.arm_controller.get_expert_state()
+        flag = self.env.remote_flag
         expert_a = self.env.arm_controller.get_expert_action()
         self.env._update_currpos()
-        delta_action = np.zeros(7)
-        if expert_a is not None:
-            delta_action[:-1] = self.compute_delta_pose(self.env.currpos, expert_a[:-1])
-            delta_action[-1] = expert_a[-1] / 50.0 - 1
-
-        if flag["expert_state"]:
+        if flag:
+            delta_action = np.zeros(7)
+            if expert_a is not None:
+                # delta_action[:-1] = self.compute_delta_pose(self.env.currpos, expert_a[:-1])
+                delta_action[:-1] = self.compute_delta_pose(self.env.last_actor_action[:-1].copy(), expert_a[:-1].copy())
+                delta_action[:3] = delta_action[:3] / self.action_scale[0]
+                delta_action[3:6] = delta_action[3:6] / self.action_scale[1]
+                delta_action[-1] = expert_a[-1] / 50.0 - 1
+                self.env.last_actor_action=expert_a.copy()
             return delta_action, True
-
+        if expert_a is not None:
+            self.env.last_actor_action=expert_a.copy()
         return action, False
 
     def step(self, action):

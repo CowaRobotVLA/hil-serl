@@ -11,12 +11,12 @@ from experiments.mappings import CONFIG_MAPPING
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string("exp_name", "cowa_pick", "Name of experiment corresponding to folder.")
-flags.DEFINE_integer("successes_needed", 20, "Number of successful demos to collect.")
+flags.DEFINE_integer("successes_needed", 1, "Number of successful demos to collect.")
 
 def main(_):
     assert FLAGS.exp_name in CONFIG_MAPPING, 'Experiment folder not found.'
     config = CONFIG_MAPPING[FLAGS.exp_name]()
-    env = config.get_environment(fake_env=False, save_video=False, classifier=True)
+    env = config.get_environment(fake_env=False, save_video=False, classifier=True, record_classifier_data = False)
     
     obs, info = env.reset()
     print("Reset done")

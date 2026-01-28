@@ -1,7 +1,7 @@
 from typing import Any, Optional
 import time
 import io
-import av
+# import av
 import threading
 from collections import deque
 import abc 
@@ -304,6 +304,40 @@ class BaseInfoDecoder(BasicDecoder):
                     self.stack.push(speed)
                     self.last_push_time = current_time
 
+class LeaderArmStateDecoder(BasicDecoder):
+    def __call__(self, msg: wheel_pb2.RobotRLInfo):
+        super().__call__(msg)
+
+    def _decode_loop(self):
+        while 1:
+            # print(f"{self.stop_flag=}")
+            if not self.stop_flag:
+                try:
+                    # print("cache length: ", self.cache.qsize())
+                    msg = self.cache.get(timeout=0.01)  # 没消息会常见性超时
+                except Empty:
+                    continue  # 正常情况：这轮没消息，继续下一轮
+                joints_pos = [999]*7 #6关节加1夹爪
+                updated = False
+                for idx, pos in zip(msg.joint_state.index, msg.joint_state.pos):
+                    joints_pos[idx] = pos
+                    # TODO: 增加常见error code的处理           
+
+                    if 0 <= idx < 7:        # 防越界
+                        joints_pos[idx] = pos
+                        updated = True
+                    
+                if not updated:
+                    continue  # 这条消息没有效数据，跳过
+
+                # 控制频率
+                current_time = time.time()
+                if current_time - self.last_push_time >= self.min_interval or self.last_push_time==0.0:
+                    self.stack.push({"joints_pos": joints_pos.copy(), "timestamp": time.time()})
+                    self.last_push_time = current_time
+            else:
+                time.sleep(self.min_interval)
+
 class ArmStateDecoder(BasicDecoder):
     def __call__(self, msg: wheel_pb2.RobotRLInfo):
         super().__call__(msg)
@@ -520,6 +554,16 @@ if __name__ == "__main__":
                 a = ee_info['ee_pose']
                 print(a)
 
+    def test_leaderarm_decoder(node):
+        eepose_stack = ThreadSafeStack(10)
+        eepose_decoder = LeaderArmStateDecoder(stack=eepose_stack, freq=100)
+        reader = node.CreateReader("/RL/base_info/leader_arm", eepose_decoder)
+        while 1:
+            flag, ee_info = eepose_stack.peek()
+            if flag:
+                a = ee_info['joints_pos']
+                print(a)
+
     def test_expert_state(node):
         expert_stack = ThreadSafeStack(10)
         expert_decoder = LeaderCommandDecoder(stack=expert_stack, freq=10)
@@ -541,7 +585,7 @@ if __name__ == "__main__":
     try:
         # test_arm_state_decoder(node)
         # test_expert_state(node)
-        test_eeposo_decoder(node)
+        test_leaderarm_decoder(node)
         # test_dropQ()
     except KeyboardInterrupt:
         pycrmw.AsyncShutdown() 

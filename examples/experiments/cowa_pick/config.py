@@ -25,7 +25,8 @@ from experiments.cowa_pick.wrapper import PickEnv, GripperPenaltyWrapper
 
 class EnvConfig(DefaultEnvConfig):
     SERVER_URL: str = "http://127.0.0.2:5000/"
-    IMAGE_CROP = {"panorama/3": lambda img: img}
+    IMAGE_CROP = {"panorama/3": lambda img: img,
+                  "surround/front": lambda img: img}
     TARGET_POSE = np.array([0.5,0.0,-0.1, 0, np.pi, 0])
     RESET_POSE = TARGET_POSE + np.array([0, 0, 0.2, 0, 0, 0])
     ACTION_SCALE = np.array([0.1, 0.1, 50])
@@ -79,8 +80,8 @@ class EnvConfig(DefaultEnvConfig):
 
 
 class TrainConfig(DefaultTrainingConfig):
-    image_keys = ["panorama/3"]
-    classifier_keys = ["panorama/3"]
+    image_keys = ["panorama/3", "surround/front"]
+    classifier_keys = ["panorama/3", "surround/front"]
     proprio_keys = ["tcp_pose", "q", "dq", "gripper_pose"]
     checkpoint_period = 2000
     cta_ratio = 2
@@ -91,27 +92,35 @@ class TrainConfig(DefaultTrainingConfig):
     setup_mode = "single-arm-learned-gripper"
     # "single-arm-learned-gripper"  # "single-arm-fixed-gripper"
 
-    def get_environment(self, fake_env=False, save_video=False, classifier=False, device = "cuda"):
+    def get_environment(self, fake_env=False, save_video=False, classifier=False, record_classifier_data = False, device = "cuda"):
+        keyboard_classifier = True
         env = PickEnv(
-            fake_env=fake_env, save_video=save_video, config=EnvConfig()
+            fake_env=fake_env, save_video=save_video, record_classifier_data=record_classifier_data, config=EnvConfig()
         )
         if not fake_env:
             env = SpacemouseIntervention(env)
-        env = RelativeFrame(env)
+        # env = RelativeFrame(env)
         # env = Quat2EulerWrapper(env)
         env = SERLObsWrapper(env, proprio_keys=self.proprio_keys)
         env = ChunkingWrapper(env, obs_horizon=1, act_exec_horizon=None)
         if classifier:
-            classifier = load_classifier_func(
-                sample=env.observation_space.sample(),
-                image_keys=self.image_keys,
-                checkpoint_path=os.path.abspath("classifier_ckpt/classifier.pth"),
-                device=device,
-            )
+            if not keyboard_classifier:
+                classifier = load_classifier_func(
+                    sample=env.observation_space.sample(),
+                    image_keys=self.image_keys,
+                    checkpoint_path=os.path.abspath("classifier_ckpt/classifier.pth"),
+                    device=device,
+                )
 
             def reward_func(obs):
-                sigmoid = lambda x: 1 / (1 + torch.exp(-x))
-                return int(sigmoid(classifier(obs)) > 0.7 and obs["state"][0, 6] < 0.6)
+                if keyboard_classifier:
+                    if env.success == True:
+                        return 1
+                    else:
+                        return 0
+                else:
+                    sigmoid = lambda x: 1 / (1 + torch.exp(-x))
+                    return int(sigmoid(classifier(obs)) > 0.7 and obs["state"][0, 6] < 0.6)
             # def reward_func(obs):
             #     return int(classifier(obs) > 0.5)
 
