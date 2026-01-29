@@ -316,8 +316,8 @@ class SpacemouseIntervention(gym.ActionWrapper):
         if flag:
             delta_action = np.zeros(7)
             if expert_a is not None:
-                # delta_action[:-1] = self.compute_delta_pose(self.env.currpos, expert_a[:-1])
-                delta_action[:-1] = self.compute_delta_pose(self.env.last_actor_action[:-1].copy(), expert_a[:-1].copy())
+                delta_action[:-1] = self.compute_delta_pose(self.env.currpos, expert_a[:-1])
+                # delta_action[:-1] = self.compute_delta_pose(self.env.last_actor_action[:-1].copy(), expert_a[:-1].copy())
                 delta_action[:3] = delta_action[:3] / self.action_scale[0]
                 delta_action[3:6] = delta_action[3:6] / self.action_scale[1]
                 delta_action[-1] = expert_a[-1] / 50.0 - 1

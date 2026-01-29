@@ -1,4 +1,11 @@
 import os
+import sys
+CURRENT_PATH = os.getcwd()
+sys.path.append(CURRENT_PATH)
+for i, p in enumerate(sys.path):
+    if ".local" in p:
+        sys.path.pop(i)
+
 from tqdm import tqdm
 import numpy as np
 import copy
@@ -11,7 +18,7 @@ from experiments.mappings import CONFIG_MAPPING
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string("exp_name", "cowa_pick", "Name of experiment corresponding to folder.")
-flags.DEFINE_integer("successes_needed", 1, "Number of successful demos to collect.")
+flags.DEFINE_integer("successes_needed", 10, "Number of successful demos to collect.")
 
 def main(_):
     assert FLAGS.exp_name in CONFIG_MAPPING, 'Experiment folder not found.'

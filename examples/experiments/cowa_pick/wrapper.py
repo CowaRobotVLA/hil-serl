@@ -106,7 +106,7 @@ class PickEnv(cowa_env):
         # step1: close gripper
         self._update_currpos()
         self._send_command(self.currpos, 5, self.q)
-        time.sleep(0.5)
+        time.sleep(1.5)
 
         # step2: reset pose
         if self.randomreset:  # randomize reset position in xy plane
@@ -122,7 +122,7 @@ class PickEnv(cowa_env):
             self.interpolate_move(reset_pose, timeout=2)
         else:
             reset_pose = self.resetpos.copy()
-            self.interpolate_move(reset_pose, timeout=1.0)
+            self.interpolate_move(reset_pose, timeout=2.0)
         # step3: open gripper
         self._update_currpos()
         self._send_command(self.currpos, 95, self.q)

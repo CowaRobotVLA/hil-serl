@@ -252,6 +252,7 @@ class cowa_env(gym.Env):
         ).as_quat()
 
         gripper_action = (action[-1] + 1)* self.action_scale[2]
+        gripper_action = 100
         self._send_command(self.nextpos, gripper_action, self.q)
         # self._send_command([0.4, 0, -0.1, 0, 1, 0, 0], gripper_action, self.q)
 
