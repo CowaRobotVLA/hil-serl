@@ -10,23 +10,27 @@ from scipy.spatial.transform import Rotation as R
 from typing import List
 import threading
 from serl_robot_infra.robot_env.utils.arm_controller import ArmController
-from serl_robot_infra.robot_env.utils.cr_node_util import ThreadSafeStack, LeaderArmStateDecoder
+from serl_robot_infra.robot_env.utils.cr_node_util import ThreadSafeStack, LeaderArmStateDecoder, EeposeDecoder
 
 sigmoid = lambda x: 1 / (1 + np.exp(-x))
 
 class HilserlArmControllerWrapper(ArmController):
     def __init__(self, node, dof_num, control_mode = "vel", receive_interval=0.002, publish_interval=0.01, timeout_interval=0.2):
         super().__init__(node, dof_num, control_mode, receive_interval, publish_interval, timeout_interval)
+        self.expert_action = None
+        self.expert_state = None
+        # self.expert_command_stack = ThreadSafeStack(max_size=1)
+        # expert_command_decoder = LeaderArmStateDecoder(stack=self.expert_command_stack, freq=100)
+        # self.expert_command_reader = node.CreateReader("/RL/base_info/leader_arm", expert_command_decoder)
+        # self.update_expert_command_thread = threading.Thread(target=self._update_expert_action, daemon=True)
+        # self.update_expert_command_thread.start()
         self.expert_command_stack = ThreadSafeStack(max_size=1)
-        expert_command_decoder = LeaderArmStateDecoder(stack=self.expert_command_stack, freq=20)
-        self.expert_command_reader = node.CreateReader("/RL/base_info/leader_arm", expert_command_decoder)
-        self.expert_state_stack = ThreadSafeStack(max_size=1)
+        expert_command_decoder = EeposeDecoder(stack=self.expert_command_stack, freq=100)
+        self.expert_command_reader = node.CreateReader("/RL/base_info/arm_eepos", expert_command_decoder)
         self.update_expert_command_thread = threading.Thread(target=self._update_expert_action, daemon=True)
         self.update_expert_command_thread.start()
         self.last_actor_action = None
 
-        self.expert_action = None
-        self.expert_state = None
 
     def _update_expert_action(self):
         while True:
@@ -34,14 +38,18 @@ class HilserlArmControllerWrapper(ArmController):
             while not flag:
                 time.sleep(0.01)
                 flag, expert_action = self.expert_command_stack.pop()
-            self.set_expert_action(expert_action["joints_pos"])
-            time.sleep(1/30)
+            self.set_expert_action(expert_action["ee_pose"])
+            # self.set_expert_action(expert_action["joints_pos"])
+            # time.sleep(1/30)
     
     def set_expert_action(self, expert_action):
         with self.arm_state_lock:
             if self.expert_action is None:
                 self.expert_action = np.zeros(8) 
-            self.expert_action[:3], self.expert_action[3:7] = self.get_ee_pos_by_q(expert_action[1:])
+            # xyz, quat, _ = self.robot_solver.forward_kinematics(np.array(expert_action[1:]))
+            # self.expert_action[:3], self.expert_action[3:7] = xyz.copy(), quat.copy()
+            # self.expert_action[7] = expert_action[0]
+            self.expert_action[:7] = expert_action
             self.expert_action[7] = expert_action[0]
 
     def get_expert_action(self):

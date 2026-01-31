@@ -26,16 +26,16 @@ from experiments.cowa_pick.wrapper import PickEnv, GripperPenaltyWrapper
 class EnvConfig(DefaultEnvConfig):
     SERVER_URL: str = "http://127.0.0.2:5000/"
     IMAGE_CROP = {"panorama/3": lambda img: img,
-                  "surround/front": lambda img: img}
+                  "surround/front": lambda img: img[350:, 330:-330]}
     TARGET_POSE = np.array([0.5,0.0,-0.1, 0, np.pi, 0])
     RESET_POSE = TARGET_POSE + np.array([0, 0, 0.2, 0, 0, 0])
-    ACTION_SCALE = np.array([0.1, 0.1, 50])
+    ACTION_SCALE = np.array([0.15, 0.5, 50])
     RANDOM_RESET = False
     DISPLAY_IMAGE = False
     RANDOM_XY_RANGE = 0.01
     RANDOM_RZ_RANGE = 0.1
-    ABS_POSE_LIMIT_HIGH = TARGET_POSE + np.array([0.1, 0.1, 0.3, 0.2, 0.2, 0.3])
-    ABS_POSE_LIMIT_LOW = TARGET_POSE - np.array([0.1, 0.05, 0.2, 0.2, 0.2, 0.3])
+    ABS_POSE_LIMIT_HIGH = TARGET_POSE + np.array([0.3, 0.15, 0.3, 0.2, 0.2, 0.3])
+    ABS_POSE_LIMIT_LOW = TARGET_POSE - np.array([0.05, 0.15, 0.2, 0.2, 0.2, 0.3])
     COMPLIANCE_PARAM = {
         "translational_stiffness": 2000,
         "translational_damping": 89,

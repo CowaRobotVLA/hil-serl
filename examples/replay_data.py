@@ -43,7 +43,7 @@ def extract_and_save_images(transitions, output_dir, save_video=True, fps=10):
     for i, transition in enumerate(tqdm(transitions, desc="Extracting images")):
         # 提取panorama/3图片
         if 'observations' in transition and 'panorama/3' in transition['observations']:
-            img = transition['observations']['panorama/3']
+            img = transition['observations']['surround/front']
             
             # 确保图片格式正确
             if isinstance(img, np.ndarray):

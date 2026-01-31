@@ -43,7 +43,7 @@ class EnvConfig(DefaultEnvConfig):
         },
     }
     IMAGE_CROP = {"wrist_1": lambda img: img[50:-200, 200:-200],
-                  "wrist_2": lambda img: img[:-200, 200:-200],
+                  "wrist_2": lambda img: img[200:, 200:-200],
                   "side_policy": lambda img: img[250:500, 350:650],
                   "side_classifier": lambda img: img[270:398, 500:628]}
     TARGET_POSE = np.array([0.553,0.1769683108549487,0.25097833796596336, np.pi, 0, -np.pi/2])

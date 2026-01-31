@@ -9,7 +9,7 @@ from datetime import datetime
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string("exp_name", "cowa_pick", "Name of experiment corresponding to folder.")
-flags.DEFINE_string("data_file", "cowa_pick_failure_images_2026-01-22_20-07-40.pkl", "Path to the data file to replay.")
+flags.DEFINE_string("data_file", "cowa_pick_10_success_images_2026-01-31_12-19-00.pkl", "Path to the data file to replay.")
 flags.DEFINE_string("output_dir", "./replay_images", "Directory to save extracted images.")
 flags.DEFINE_integer("fps", 10, "Frames per second for video.")
 flags.DEFINE_integer("max_transitions", -1, "Maximum number of transitions to process (-1 for all).")
@@ -61,7 +61,7 @@ def display_and_filter_transitions(transitions, output_dir):
     for i, transition in enumerate(transitions):
         # 提取panorama/3图片
         if 'observations' in transition and 'panorama/3' in transition['observations']:
-            img = transition['observations']['panorama/3']
+            img = transition['observations']['surround/front']
             
             # 确保图片格式正确
             if isinstance(img, np.ndarray):

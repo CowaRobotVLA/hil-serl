@@ -12,6 +12,12 @@ import tqdm
 from absl import app, flags
 
 import os
+import sys
+CURRENT_PATH = os.getcwd()
+sys.path.append(CURRENT_PATH)
+for i, p in enumerate(sys.path):
+    if ".local" in p:
+        sys.path.pop(i)
 import copy
 from typing import Optional
 import pickle as pkl
@@ -48,7 +54,7 @@ flags.DEFINE_integer("seed", 42, "Random seed.")
 flags.DEFINE_boolean("learner", False, "Whether this is a learner.")
 flags.DEFINE_boolean("actor", True, "Whether this is an actor.")
 flags.DEFINE_string("ip", "localhost", "IP address of the learner.")
-flags.DEFINE_multi_string("demo_path", "demo_data/cowa_pick_20_demos_2026-01-21_18-12-29.pkl", "Path to the demo data.")
+flags.DEFINE_multi_string("demo_path", "demo_data/cowa_pick_20_demos_2026-01-31_10-15-34.pkl", "Path to the demo data.")
 flags.DEFINE_string("checkpoint_path", "rlpd_ckpt", "Path to save checkpoints.")
 # flags.DEFINE_integer("eval_checkpoint_step", 0, "Step to evaluate the checkpoint.")
 # flags.DEFINE_integer("eval_n_trajs", 0, "Number of trajectories to evaluate.")

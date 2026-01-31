@@ -1,5 +1,11 @@
 import copy
 import os
+import sys
+CURRENT_PATH = os.getcwd()
+sys.path.append(CURRENT_PATH)
+for i, p in enumerate(sys.path):
+    if ".local" in p:
+        sys.path.pop(i)
 from tqdm import tqdm
 import numpy as np
 import pickle as pkl
@@ -11,7 +17,7 @@ from experiments.mappings import CONFIG_MAPPING
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string("exp_name", "cowa_pick", "Name of experiment corresponding to folder.")
-flags.DEFINE_integer("successes_needed", 1000, "Number of successful transistions to collect.")
+flags.DEFINE_integer("successes_needed", 10, "Number of successful transistions to collect.")
 
 
 success_key = []

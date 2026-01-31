@@ -244,10 +244,11 @@ class cowa_env(gym.Env):
         self._update_currpos()
         self.nextpos = self.currpos.copy()
         self.nextpos[:3] = self.nextpos[:3] + xyz_delta * self.action_scale[0]
-
+        delat_euler = Rotation.from_rotvec(action[3:6]).as_euler("xyz")
+        delat_euler *= np.array([self.action_scale[0],self.action_scale[0],self.action_scale[1]])
         # GET ORIENTATION FROM ACTION
         self.nextpos[3:] = (
-            Rotation.from_rotvec(action[3:6] * self.action_scale[1])
+            Rotation.from_euler("xyz",delat_euler)
             * Rotation.from_quat(self.currpos[3:])
         ).as_quat()
 
@@ -489,7 +490,7 @@ class cowa_env(gym.Env):
         requests.post(self.url + "clearerr")
 
     def _send_command(self, eepos, grip_pos, q):
-        q = self.arm_controller.get_q_by_ee_pos(eepos[:3], eepos[3:], grip_pos, q)
+        q = self.arm_controller.get_q_by_ee_pos(eepos[:3], eepos[3:], grip_pos)
         self.arm_controller.set_target(q) 
 
     def _update_currpos(self):

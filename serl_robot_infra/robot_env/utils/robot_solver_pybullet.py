@@ -23,7 +23,7 @@ from typing import List, Tuple, Optional
 import numpy as np
 import pybullet as p
 import pybullet_data
-
+import threading
 
 def quat_to_rot(q: np.ndarray) -> np.ndarray:
     """Convert quaternion [x,y,z,w] to 3x3 rotation matrix."""
@@ -85,6 +85,7 @@ class RobotSolver:
         # pick only movable joints
         self.movable_joints = [i for i in range(self.num_joints) if p.getJointInfo(self.robot_id, i)[2] != p.JOINT_FIXED]
         print(f"{self.movable_joints=}")
+        self._lock = threading.Lock()
 
     def disconnect(self):
         p.disconnect(self.cid)
@@ -132,14 +133,15 @@ class RobotSolver:
         if len(joint_positions) != len(self.movable_joints):
             raise ValueError("joint_positions must have length equal to the number of movable joints")
         # set joint states (use resetJointState to instantly set configuration)
-        for jid, q in zip(self.movable_joints, joint_positions):
-            p.resetJointState(self.robot_id, jid, q)
-        # step simulation so internal kinematics update (not strictly necessary for resetJointState but safe)
-        p.stepSimulation()
+        with self._lock:
+            for jid, q in zip(self.movable_joints, joint_positions):
+                p.resetJointState(self.robot_id, jid, q)
+            # step simulation so internal kinematics update (not strictly necessary for resetJointState but safe)
+            # p.stepSimulation()
 
-        pos, quat = self.get_link_frame_pose(link_index)
-        T = homogeneous_from_pos_quat(pos, quat)
-        return pos, quat, T
+            pos, quat = self.get_link_frame_pose(link_index)
+            T = homogeneous_from_pos_quat(pos, quat)
+            return pos, quat, T
 
     # ----------------------------- inverse kinematics -----------------------------
     def inverse_kinematics(self, target_pos: List[float], target_quat: Optional[List[float]], link_index: int=18,
@@ -150,16 +152,18 @@ class RobotSolver:
         - returns list of joint angles for movable_joints
         """
         # run the IK solver
-        if rest_poses is None:
-            if target_quat is None:
-                sol = p.calculateInverseKinematics(self.robot_id, link_index, target_pos)
+        with self._lock:
+            if rest_poses is None:
+                if target_quat is None:
+                    sol = p.calculateInverseKinematics(self.robot_id, link_index, target_pos)
+                else:
+                    sol = p.calculateInverseKinematics(self.robot_id, link_index, target_pos, target_quat)
             else:
-                sol = p.calculateInverseKinematics(self.robot_id, link_index, target_pos, target_quat)
-        else:
-            if target_quat is None:
-                sol = p.calculateInverseKinematics(self.robot_id, link_index, target_pos, restPoses=rest_poses)
-            else:
-                sol = p.calculateInverseKinematics(self.robot_id, link_index, target_pos, target_quat, restPoses=rest_poses)
+                if target_quat is None:
+                    sol = p.calculateInverseKinematics(self.robot_id, link_index, target_pos, restPoses=rest_poses)
+                else:
+                    sol = p.calculateInverseKinematics(self.robot_id, link_index, target_pos, target_quat, restPoses=rest_poses)
+            return sol
         # `sol` is a list for all joints (including fixed); we extract values for movable_joints
         # sol_list = list(sol)
         # result = [sol_list[j-self.movable_joints[0]] for j in self.movable_joints]
@@ -169,7 +173,7 @@ class RobotSolver:
         #     for jid, q in zip(self.movable_joints, result):
         #         p.resetJointState(self.robot_id, jid, q)
         #     p.stepSimulation()
-        return sol
+        # return sol
 
     # ----------------------------- Jacobian / velocity -----------------------------
     def ee_velocity_from_joint_vel(self, joint_positions: List[float], joint_velocities: List[float],
