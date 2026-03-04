@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import warnings
+
 warnings.filterwarnings("ignore")
 
 import logging
-logging.getLogger('asyncio').setLevel(logging.ERROR)
+
+logging.getLogger("asyncio").setLevel(logging.ERROR)
 
 import glob
 import time
@@ -21,42 +23,61 @@ from natsort import natsorted
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from serl_launcher.serl_launcher_torch.agents.continuous.sac import SACAgent
-from serl_launcher.serl_launcher_torch.agents.continuous.sac_hybrid_single import SACAgentHybridSingleArm
+# from serl_launcher.serl_launcher_torch.agents.continuous.sac import SACAgent
+# from serl_launcher.serl_launcher_torch.agents.continuous.sac_hybrid_single import SACAgentHybridSingleArm
 # from serl_launcher.serl_launcher_torch.agents.continuous.sac_hybrid_dual import SACAgentHybridDualArm
+from serl_launcher.serl_launcher_torch.agents.continuous.pi05 import Pi05Agent
+
 from serl_launcher.serl_launcher_torch.utils.timer_utils import Timer
-from serl_launcher.serl_launcher_torch.utils.train_utils import concat_batches, state_dict_to_numpy, numpy_to_state_dict, print_green
+from serl_launcher.serl_launcher_torch.utils.train_utils import (
+    concat_batches,
+    state_dict_to_numpy,
+    numpy_to_state_dict,
+    print_green,
+)
 
 from agentlace.trainer import TrainerServer, TrainerClient
 from agentlace.data.data_store import QueuedDataStore
 
-from serl_launcher.serl_launcher_torch.data.data_store import MemoryEfficientReplayBufferDataStore
+from serl_launcher.serl_launcher_torch.data.data_store import (
+    MemoryEfficientReplayBufferDataStore,
+)
 from serl_launcher.serl_launcher_torch.utils.launcher import (
-    make_sac_pixel_agent,
-    make_sac_pixel_agent_hybrid_single_arm,
+    # make_sac_pixel_agent,
+    # make_sac_pixel_agent_hybrid_single_arm,
     # make_sac_pixel_agent_hybrid_dual_arm,
     make_trainer_config,
     # make_wandb_logger,
+    make_pi05_agent,
 )
 
 from experiments.mappings import CONFIG_MAPPING
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string("exp_name", "cowa_pick", "Name of experiment corresponding to folder.")
+flags.DEFINE_string(
+    "exp_name", "cowa_pick", "Name of experiment corresponding to folder."
+)
 flags.DEFINE_integer("seed", 42, "Random seed.")
 flags.DEFINE_boolean("learner", False, "Whether this is a learner.")
 flags.DEFINE_boolean("actor", True, "Whether this is an actor.")
 flags.DEFINE_string("ip", "localhost", "IP address of the learner.")
-flags.DEFINE_multi_string("demo_path", "demo_data/cowa_pick_20_demos_2026-01-21_18-12-29.pkl", "Path to the demo data.")
+flags.DEFINE_multi_string(
+    "demo_path",
+    "demo_data/cowa_pick_20_demos_2026-01-21_18-12-29.pkl",
+    "Path to the demo data.",
+)
 flags.DEFINE_string("checkpoint_path", "rlpd_ckpt", "Path to save checkpoints.")
 # flags.DEFINE_integer("eval_checkpoint_step", 0, "Step to evaluate the checkpoint.")
 # flags.DEFINE_integer("eval_n_trajs", 0, "Number of trajectories to evaluate.")
 flags.DEFINE_boolean("save_video", False, "Save video.")
 flags.DEFINE_boolean("use_classifier", True, "Use classifier to compute reward.")
-flags.DEFINE_boolean("debug", False, "Debug mode.")  # debug mode will disable wandb logging
+flags.DEFINE_boolean(
+    "debug", False, "Debug mode."
+)  # debug mode will disable wandb logging
 
-def actor(agent: SACAgent, data_store, intvn_data_store, env, device: str = "cuda"):
+
+def actor(agent: Pi05Agent, data_store, intvn_data_store, env, device: str = "cuda"):
     """
     This is the actor loop, which runs when "--actor" is set to True.
     """
@@ -73,7 +94,6 @@ def actor(agent: SACAgent, data_store, intvn_data_store, env, device: str = "cud
         data_stores=datastore_dict,
         wait_for_server=True,
     )
-
 
     # if FLAGS.eval_checkpoint_step:
     #     success_counter = 0
@@ -115,13 +135,12 @@ def actor(agent: SACAgent, data_store, intvn_data_store, env, device: str = "cud
     #     print(f"success rate: {success_counter / FLAGS.eval_n_trajs}")
     #     print(f"average time: {np.mean(time_list)}")
     #     return  # after done eval, return and exit
-    
+
     # start_step = (
     #     int(os.path.basename(natsorted(glob.glob(os.path.join(FLAGS.checkpoint_path, "buffer/*.pkl")))[-1])[12:-4]) + 1
     #     if FLAGS.checkpoint_path and os.path.exists(FLAGS.checkpoint_path)
     #     else 0
     # )
-
 
     # Function to update the agent with new params
     def update_params(params):
@@ -154,9 +173,8 @@ def actor(agent: SACAgent, data_store, intvn_data_store, env, device: str = "cud
             else:
                 with torch.no_grad():
                     obs_tensor = {
-                            k: torch.as_tensor(v, device=device) 
-                            for k, v in obs.items()
-                        }
+                        k: torch.as_tensor(v, device=device) for k, v in obs.items()
+                    }
                     actions = agent.sample_actions(
                         observations=obs_tensor,
                         argmax=False,
@@ -194,8 +212,8 @@ def actor(agent: SACAgent, data_store, intvn_data_store, env, device: str = "cud
                 dones=done,
             )
 
-            if 'grasp_penalty' in info:
-                transition['grasp_penalty']= info['grasp_penalty']
+            if "grasp_penalty" in info:
+                transition["grasp_penalty"] = info["grasp_penalty"]
             # All data goes into replay buffer
             data_store.insert(transition)
 
@@ -247,14 +265,20 @@ def actor(agent: SACAgent, data_store, intvn_data_store, env, device: str = "cud
 ##############################################################################
 
 
-def learner(agent: SACAgent, 
-            replay_buffer: MemoryEfficientReplayBufferDataStore,
-            demo_buffer: Optional[MemoryEfficientReplayBufferDataStore] = None,
-            device: str = "cuda"):
+def learner(
+    agent: Pi05Agent,
+    replay_buffer: MemoryEfficientReplayBufferDataStore,
+    demo_buffer: Optional[MemoryEfficientReplayBufferDataStore] = None,
+    device: str = "cuda",
+):
     agent.train()
 
     # 创建TensorBoard日志目录
-    log_dir = os.path.join(FLAGS.checkpoint_path, "logs") if FLAGS.checkpoint_path else "./logs"
+    log_dir = (
+        os.path.join(FLAGS.checkpoint_path, "logs")
+        if FLAGS.checkpoint_path
+        else "./logs"
+    )
     os.makedirs(log_dir, exist_ok=True)
     tb_logger = SummaryWriter(log_dir=log_dir)
 
@@ -298,11 +322,12 @@ def learner(agent: SACAgent,
     if demo_buffer:
         single_buffer_batch_size = config.batch_size // 2
         demo_iterator = demo_buffer.get_iterator(
-        sample_args={
-            "batch_size": single_buffer_batch_size,
-            "pack_obs_and_next_obs": True,
-        },
-        device=device)
+            sample_args={
+                "batch_size": single_buffer_batch_size,
+                "pack_obs_and_next_obs": True,
+            },
+            device=device,
+        )
     else:
         single_buffer_batch_size = config.batch_size
         demo_iterator = None
@@ -318,19 +343,22 @@ def learner(agent: SACAgent,
     # wait till the replay buffer is filled with enough data
     timer = Timer()
 
-    pbar = tqdm.tqdm(total=config.replay_buffer_capacity,
-                     initial=len(replay_buffer), desc="replay buffer")
-    
-    if isinstance(agent, SACAgent):
+    pbar = tqdm.tqdm(
+        total=config.replay_buffer_capacity,
+        initial=len(replay_buffer),
+        desc="replay buffer",
+    )
+
+    if isinstance(agent, Pi05Agent):
         train_critic_networks_to_update = frozenset({"critic"})
         train_networks_to_update = frozenset({"critic", "actor", "temperature"})
     else:
         train_critic_networks_to_update = frozenset({"critic", "grasp_critic"})
-        train_networks_to_update = frozenset({"critic", "grasp_critic", "actor", "temperature"})
+        train_networks_to_update = frozenset(
+            {"critic", "grasp_critic", "actor", "temperature"}
+        )
 
-    for step in tqdm.tqdm(
-        range(config.max_steps), dynamic_ncols=True, desc="learner"
-    ):
+    for step in tqdm.tqdm(range(config.max_steps), dynamic_ncols=True, desc="learner"):
         # run n-1 critic updates and 1 critic + actor update.
         # This makes training on GPU faster by reducing the large batch transfer time from CPU to GPU
         for _ in range(config.cta_ratio - 1):
@@ -348,9 +376,9 @@ def learner(agent: SACAgent,
             if demo_iterator:
                 demo_batch = next(demo_iterator)
                 batch = concat_batches(batch, demo_batch, axis=0)
-            
-            update_info = agent.update(batch, 
-                networks_to_update=frozenset(train_networks_to_update)
+
+            update_info = agent.update(
+                batch, networks_to_update=frozenset(train_networks_to_update)
             )
 
         # publish the updated network
@@ -368,27 +396,38 @@ def learner(agent: SACAgent,
             for key, value in update_info.items():
                 if isinstance(value, (int, float)):
                     tb_logger.add_scalar(f"train/{key}", value, step)
-            
+
             # 记录计时器信息到TensorBoard
             timer_stats = timer.get_average_times()
             for key, value in timer_stats.items():
                 if isinstance(value, (int, float)):
                     tb_logger.add_scalar(f"timer/{key}", value, step)
 
-        if step > 0 and config.checkpoint_period and step % config.checkpoint_period == 0:
+        if (
+            step > 0
+            and config.checkpoint_period
+            and step % config.checkpoint_period == 0
+        ):
             assert FLAGS.checkpoint_path is not None
             os.makedirs(FLAGS.checkpoint_path, exist_ok=True)
-            checkpoint_file = os.path.join(FLAGS.checkpoint_path, f"checkpoint_{step}.pt")
+            checkpoint_file = os.path.join(
+                FLAGS.checkpoint_path, f"checkpoint_{step}.pt"
+            )
             with torch.no_grad():
-                torch.save({'step': step, 'model_state_dict': agent.state_dict()}, checkpoint_file)
+                torch.save(
+                    {"step": step, "model_state_dict": agent.state_dict()},
+                    checkpoint_file,
+                )
             print_green(f"Saved checkpoint to {checkpoint_file}")
             torch.cuda.empty_cache()
 
         pbar.update(len(replay_buffer) - pbar.n)
         step += 1
-    
+
     # 关闭TensorBoard写入器
     tb_logger.close()
+
+
 ##############################################################################
 
 
@@ -398,7 +437,7 @@ def main(_):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print_green(f"Using device: {device}")
-    
+
     torch.manual_seed(FLAGS.seed)
     np.random.seed(FLAGS.seed)
     if torch.cuda.is_available():
@@ -411,28 +450,33 @@ def main(_):
         classifier=FLAGS.use_classifier and FLAGS.actor,
     )
     env = RecordEpisodeStatistics(env)
-    
-    if config.setup_mode == 'single-arm-fixed-gripper' or config.setup_mode == 'dual-arm-fixed-gripper':   
-        print('there')
-        agent: SACAgent = make_sac_pixel_agent(
-            seed=FLAGS.seed,
-            sample_obs=env.observation_space.sample(),
-            sample_action=env.action_space.sample(),
-            image_keys=config.image_keys,
-            encoder_type=config.encoder_type,
-            discount=config.discount,
-        )
+
+    if (
+        config.setup_mode == "single-arm-fixed-gripper"
+        or config.setup_mode == "dual-arm-fixed-gripper"
+    ):
+        print("there")
+        # agent: SACAgent = make_sac_pixel_agent(
+        #     seed=FLAGS.seed,
+        #     sample_obs=env.observation_space.sample(),
+        #     sample_action=env.action_space.sample(),
+        #     image_keys=config.image_keys,
+        #     encoder_type=config.encoder_type,
+        #     discount=config.discount,
+        # )
+        agent: Pi05Agent = make_pi05_agent()
         include_grasp_penalty = False
-    elif config.setup_mode == 'single-arm-learned-gripper':
-        print('here')
-        agent: SACAgentHybridSingleArm = make_sac_pixel_agent_hybrid_single_arm(
-            seed=FLAGS.seed,
-            sample_obs=env.observation_space.sample(),
-            sample_action=env.action_space.sample(),
-            image_keys=config.image_keys,
-            encoder_type=config.encoder_type,
-            discount=config.discount,
-        )
+    elif config.setup_mode == "single-arm-learned-gripper":
+        print("here")
+        agent: Pi05Agent = make_pi05_agent()
+        # agent: SACAgentHybridSingleArm = make_sac_pixel_agent_hybrid_single_arm(
+        #     seed=FLAGS.seed,
+        #     sample_obs=env.observation_space.sample(),
+        #     sample_action=env.action_space.sample(),
+        #     image_keys=config.image_keys,
+        #     encoder_type=config.encoder_type,
+        #     discount=config.discount,
+        # )
         include_grasp_penalty = True
     # elif config.setup_mode == 'dual-arm-learned-gripper':
     #     agent: SACAgentHybridDualArm = make_sac_pixel_agent_hybrid_dual_arm(
@@ -452,13 +496,17 @@ def main(_):
     agent = agent.to(device)
 
     if FLAGS.checkpoint_path is not None and os.path.exists(FLAGS.checkpoint_path):
-        checkpoint_files = glob.glob(os.path.join(FLAGS.checkpoint_path, "checkpoint_*.pt"))
+        checkpoint_files = glob.glob(
+            os.path.join(FLAGS.checkpoint_path, "checkpoint_*.pt")
+        )
         if checkpoint_files:
             input("Checkpoint path already exists. Press Enter to resume training.")
             latest_checkpoint = max(checkpoint_files, key=os.path.getctime)
             ckpt = torch.load(latest_checkpoint, map_location=device)
-            agent.load_state_dict(ckpt['model_state_dict'], strict=False)
-            print_green(f"Loaded previous checkpoint at step {ckpt['step']} from {latest_checkpoint}.")
+            agent.load_state_dict(ckpt["model_state_dict"], strict=False)
+            print_green(
+                f"Loaded previous checkpoint at step {ckpt['step']} from {latest_checkpoint}."
+            )
         else:
             print_green(f"Checkpoint directory exists but no checkpoint files found.")
 
@@ -469,9 +517,9 @@ def main(_):
             capacity=config.replay_buffer_capacity,
             image_keys=config.image_keys,
             include_grasp_penalty=include_grasp_penalty,
-            device="cpu"
+            device="cpu",
         )
-        
+
         demo_buffer = MemoryEfficientReplayBufferDataStore(
             env.observation_space,
             env.action_space,
@@ -487,8 +535,13 @@ def main(_):
                 with open(path, "rb") as f:
                     transitions = pkl.load(f)
                     for transition in transitions:
-                        if 'infos' in transition and 'grasp_penalty' in transition['infos']:
-                            transition['grasp_penalty'] = transition['infos']['grasp_penalty']
+                        if (
+                            "infos" in transition
+                            and "grasp_penalty" in transition["infos"]
+                        ):
+                            transition["grasp_penalty"] = transition["infos"][
+                                "grasp_penalty"
+                            ]
                         demo_buffer.insert(transition)
         else:
             print_green("No demo path provided. Creating empty demo buffer.")
@@ -525,7 +578,9 @@ def main(_):
 
         # learner loop
         print_green("starting learner loop")
-        learner(agent, replay_buffer=replay_buffer, demo_buffer=demo_buffer, device=device)
+        learner(
+            agent, replay_buffer=replay_buffer, demo_buffer=demo_buffer, device=device
+        )
 
     elif FLAGS.actor:
         data_store = QueuedDataStore(50000)  # the queue size on the actor

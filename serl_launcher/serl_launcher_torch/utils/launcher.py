@@ -8,6 +8,7 @@ from serl_launcher_torch.common.wandb import WandBLogger
 # from serl_launcher_torch.agents.continuous.bc import BCAgent
 from serl_launcher_torch.agents.continuous.sac import SACAgent
 from serl_launcher_torch.agents.continuous.sac_hybrid_single import SACAgentHybridSingleArm
+from serl_launcher_torch.agents.continuous.pi05 import PI05Agent
 # from serl_launcher_torch.agents.continuous.sac_hybrid_dual import SACAgentHybridDualArm
 from serl_launcher_torch.vision.data_augmentations import batched_random_crop
 
@@ -111,6 +112,75 @@ def make_sac_pixel_agent_hybrid_single_arm(
         augmentation_function=make_batch_augmentation_func(image_keys),
         device=device,
     )
+    return agent
+
+
+def make_pi05_agent(
+    seed: int,
+    sample_obs: dict,
+    sample_action: torch.Tensor,
+    config_name: str = "pi05_libero",
+    num_images_in_input: int = 2,
+    action_chunk: int = 5,
+    action_env_dim: int = 7,
+    num_steps: int = 10,
+    noise_method: str = "flow_sde",
+    noise_level: float = 0.5,
+    add_value_head: bool = True,
+    train_expert_only: bool = False,
+    model_lr: float = 3e-4,
+    discount: float = 0.97,
+    image_keys: tuple = ("image",),
+    device: str = "cuda",
+):
+    """
+    Create PI05 agent for reinforcement learning with pretrained vision-language-action model.
+    
+    Args:
+        seed: Random seed
+        sample_obs: Sample observation from environment
+        sample_action: Sample action from environment
+        config_name: Configuration name (pi05_libero, pi05_maniskill, etc.)
+        num_images_in_input: Number of images in input
+        action_chunk: Number of actions to predict in chunk
+        action_env_dim: Environment action dimension
+        num_steps: Number of denoising steps
+        noise_method: Noise method for flow matching (flow_sde, flow_noise, flow_cps)
+        noise_level: Noise level for SDE
+        add_value_head: Whether to add value head for critic estimation
+        train_expert_only: Whether to train only expert model (freeze VLM)
+        model_lr: Learning rate for model optimizer
+        discount: Discount factor for RL
+        image_keys: Keys for image observations
+        device: Device to create agent on
+        
+    Returns:
+        PI05Agent instance
+    """
+    torch.manual_seed(seed)
+    
+    # Create augmentation function
+    augmentation_function = make_batch_augmentation_func(image_keys)
+    
+    agent = PI05Agent.create(
+        sample_obs=sample_obs,
+        sample_action=sample_action,
+        config_name=config_name,
+        num_images_in_input=num_images_in_input,
+        action_chunk=action_chunk,
+        action_env_dim=action_env_dim,
+        num_steps=num_steps,
+        noise_method=noise_method,
+        noise_level=noise_level,
+        add_value_head=add_value_head,
+        train_expert_only=train_expert_only,
+        model_lr=model_lr,
+        discount=discount,
+        augmentation_function=augmentation_function,
+        device=device,
+        seed=seed,
+    )
+    
     return agent
 
 

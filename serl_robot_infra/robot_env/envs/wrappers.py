@@ -1,22 +1,38 @@
+import threading
 import time
-from gymnasium import Env, spaces
+from typing import List
+
 import gymnasium as gym
 import numpy as np
+from gymnasium import Env, spaces
 from gymnasium.spaces import Box
-import copy
-from serl_robot_infra.robot_env.spacemouse.spacemouse_expert import SpaceMouseExpert
-import requests
 from scipy.spatial.transform import Rotation as R
-from typing import List
-import threading
+
+from serl_robot_infra.robot_env.spacemouse.spacemouse_expert import SpaceMouseExpert
 from serl_robot_infra.robot_env.utils.arm_controller import ArmController
-from serl_robot_infra.robot_env.utils.cr_node_util import ThreadSafeStack, LeaderArmStateDecoder, EeposeDecoder
+from serl_robot_infra.robot_env.utils.cr_node_util import EeposeDecoder, ThreadSafeStack
 
 sigmoid = lambda x: 1 / (1 + np.exp(-x))
 
+
 class HilserlArmControllerWrapper(ArmController):
-    def __init__(self, node, dof_num, control_mode = "vel", receive_interval=0.002, publish_interval=0.01, timeout_interval=0.2):
-        super().__init__(node, dof_num, control_mode, receive_interval, publish_interval, timeout_interval)
+    def __init__(
+        self,
+        node,
+        dof_num,
+        control_mode="vel",
+        receive_interval=0.002,
+        publish_interval=0.01,
+        timeout_interval=0.2,
+    ):
+        super().__init__(
+            node,
+            dof_num,
+            control_mode,
+            receive_interval,
+            publish_interval,
+            timeout_interval,
+        )
         self.expert_action = None
         self.expert_state = None
         # self.expert_command_stack = ThreadSafeStack(max_size=1)
@@ -25,12 +41,17 @@ class HilserlArmControllerWrapper(ArmController):
         # self.update_expert_command_thread = threading.Thread(target=self._update_expert_action, daemon=True)
         # self.update_expert_command_thread.start()
         self.expert_command_stack = ThreadSafeStack(max_size=1)
-        expert_command_decoder = EeposeDecoder(stack=self.expert_command_stack, freq=100)
-        self.expert_command_reader = node.CreateReader("/RL/base_info/arm_eepos", expert_command_decoder)
-        self.update_expert_command_thread = threading.Thread(target=self._update_expert_action, daemon=True)
+        expert_command_decoder = EeposeDecoder(
+            stack=self.expert_command_stack, freq=100
+        )
+        self.expert_command_reader = node.CreateReader(
+            "/RL/base_info/arm_eepos", expert_command_decoder
+        )
+        self.update_expert_command_thread = threading.Thread(
+            target=self._update_expert_action, daemon=True
+        )
         self.update_expert_command_thread.start()
         self.last_actor_action = None
-
 
     def _update_expert_action(self):
         while True:
@@ -41,11 +62,11 @@ class HilserlArmControllerWrapper(ArmController):
             self.set_expert_action(expert_action["ee_pose"])
             # self.set_expert_action(expert_action["joints_pos"])
             # time.sleep(1/30)
-    
+
     def set_expert_action(self, expert_action):
         with self.arm_state_lock:
             if self.expert_action is None:
-                self.expert_action = np.zeros(8) 
+                self.expert_action = np.zeros(8)
             # xyz, quat, _ = self.robot_solver.forward_kinematics(np.array(expert_action[1:]))
             # self.expert_action[:3], self.expert_action[3:7] = xyz.copy(), quat.copy()
             # self.expert_action[7] = expert_action[0]
@@ -62,8 +83,8 @@ class HilserlArmControllerWrapper(ArmController):
                 time.sleep(0.01)
                 flag, expert_state = self.expert_state_stack.pop()
             self.set_expert_state(expert_state)
-            time.sleep(1/30)
-    
+            time.sleep(1 / 30)
+
     def set_expert_state(self, expert_state):
         with self.arm_state_lock:
             self.expert_state = expert_state
@@ -75,7 +96,7 @@ class HilserlArmControllerWrapper(ArmController):
 class HumanClassifierWrapper(gym.Wrapper):
     def __init__(self, env):
         super().__init__(env)
-    
+
     def step(self, action):
         obs, rew, done, truncated, info = self.env.step(action)
         if done:
@@ -86,20 +107,21 @@ class HumanClassifierWrapper(gym.Wrapper):
                     break
                 except:
                     continue
-        info['succeed'] = rew
+        info["succeed"] = rew
         return obs, rew, done, truncated, info
-    
+
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
         return obs, info
-    
+
+
 class MultiCameraBinaryRewardClassifierWrapper(gym.Wrapper):
     """
     This wrapper uses the camera images to compute the reward,
     which is not part of the observation space
     """
 
-    def __init__(self, env: Env, reward_classifier_func, target_hz = None):
+    def __init__(self, env: Env, reward_classifier_func, target_hz=None):
         super().__init__(env)
         self.reward_classifier_func = reward_classifier_func
         self.target_hz = target_hz
@@ -114,24 +136,24 @@ class MultiCameraBinaryRewardClassifierWrapper(gym.Wrapper):
         obs, rew, done, truncated, info = self.env.step(action)
         rew = self.compute_reward(obs)
         done = done or rew
-        info['succeed'] = bool(rew)
+        info["succeed"] = bool(rew)
         if self.target_hz is not None:
-            time.sleep(max(0, 1/self.target_hz - (time.time() - start_time)))
-            
+            time.sleep(max(0, 1 / self.target_hz - (time.time() - start_time)))
+
         return obs, rew, done, truncated, info
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
-        info['succeed'] = False
+        info["succeed"] = False
         return obs, info
-    
-    
+
+
 class MultiStageBinaryRewardClassifierWrapper(gym.Wrapper):
     def __init__(self, env: Env, reward_classifier_func: List[callable]):
         super().__init__(env)
         self.reward_classifier_func = reward_classifier_func
         self.received = [False] * len(reward_classifier_func)
-    
+
     def compute_reward(self, obs):
         rewards = [0] * len(self.reward_classifier_func)
         for i, classifier_func in enumerate(self.reward_classifier_func):
@@ -149,14 +171,16 @@ class MultiStageBinaryRewardClassifierWrapper(gym.Wrapper):
     def step(self, action):
         obs, rew, done, truncated, info = self.env.step(action)
         rew = self.compute_reward(obs)
-        done = (done or all(self.received)) # either environment done or all rewards satisfied
-        info['succeed'] = all(self.received)
+        done = done or all(
+            self.received
+        )  # either environment done or all rewards satisfied
+        info["succeed"] = all(self.received)
         return obs, rew, done, truncated, info
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
         self.received = [False] * len(self.reward_classifier_func)
-        info['succeed'] = False
+        info["succeed"] = False
         return obs, info
 
 
@@ -232,10 +256,11 @@ class DualQuat2EulerWrapper(gym.ObservationWrapper):
             (tcp_pose[:3], R.from_quat(tcp_pose[3:]).as_euler("xyz"))
         )
         return observation
-    
+
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
         return self.observation(obs), info
+
 
 class GripperCloseEnv(gym.ActionWrapper):
     """
@@ -259,58 +284,122 @@ class GripperCloseEnv(gym.ActionWrapper):
         if "intervene_action" in info:
             info["intervene_action"] = info["intervene_action"][:6]
         return obs, rew, done, truncated, info
-    
+
     def reset(self, **kwargs):
         return self.env.reset(**kwargs)
 
-    
+
 class SpacemouseIntervention(gym.ActionWrapper):
-    def __init__(self, env, action_indices=None):
+    def __init__(self, env, action_indices=None, control_mode: str = "delta_ee"):
+        """
+        Spacemouse intervention wrapper.
+
+        Args:
+            env: The environment to wrap
+            action_indices: Indices of actions to use
+            control_mode: output action mode, either:
+                - "delta_ee": Output relative EE pose (delta xyz + delta rpy + gripper)
+                - "absolute_joint": Output absolute joint positions (for joint control)
+        """
         super().__init__(env)
 
         self.gripper_enabled = True
-        if self.action_space.shape == (6,):
+        if self.action_space.shape == (7,):
             self.gripper_enabled = False
 
         self.left, self.right = False, False
         self.action_indices = action_indices
+        self.control_mode = control_mode
 
     def compute_delta_pose(self, current_pose, target_pose):
         """
         计算两个末端位姿之间的增量
-        
+
         Args:
             current_pose: [x, y, z, qx, qy, qz, qw] (7,)
             target_pose: [x, y, z, qx, qy, qz, qw] (7,)
-        
+
         Returns:
-            delta_pose: [dx, dy, dz, ax, ay, az] (6,) 
+            delta_pose: [dx, dy, dz, ax, ay, az] (6,)
                         前3维是位置差，后3维是轴角表示的旋转差
         """
         # 分离位置和四元数
         pos_current = current_pose[:3]
         quat_current = current_pose[3:]  # [qx, qy, qz, qw]
-        
+
         pos_target = target_pose[:3]
         quat_target = target_pose[3:]
-        
+
         # 1. 计算位置差
         delta_pos = pos_target - pos_current
-        
+
         # 2. 计算旋转差
         # R_delta = R_target * R_current^(-1)
         rot_current = R.from_quat(quat_current)
         rot_target = R.from_quat(quat_target)
-        
+
         rot_delta = rot_target * rot_current.inv()
-        
+
         # 3. 转换为轴角表示（旋转向量）
         delta_rot = rot_delta.as_rotvec()  # [ax*θ, ay*θ, az*θ]
-        
+
         # 4. 拼接结果
         delta_pose = np.concatenate([delta_pos, delta_rot])
-        
+
         return delta_pose
+
+    def compute_target_ee_pose(self, delta_action):
+        """
+        从当前 EE pose 和 delta action 计算目标 EE pose。
+
+        Args:
+            delta_action: [dx, dy, dz, ax, ay, az, gripper] (7,)
+                        前3维是位置增量(米)，后3维是旋转增量(轴角)，最后是夹爪
+
+        Returns:
+            target_ee_pose: [x, y, z, qx, qy, qz, qw] (7,)
+            gripper: Gripper position
+        """
+        # 1. 获取当前 EE pose（从环境状态获取）
+        self.env._update_currpos()
+        current_ee_pose = self.env.currpos  # [x, y, z, qx, qy, qz, qw]
+
+        # 2. 计算目标 EE pose = 当前 EE pose + delta
+        # 位置增量
+        target_xyz = current_ee_pose[:3] + delta_action[:3]
+
+        # 旋转增量（轴角转换为四元数）
+        delta_rot_vec = delta_action[3:6]
+        if np.linalg.norm(delta_rot_vec) > 1e-6:
+            delta_rot = R.from_rotvec(delta_rot_vec)
+            current_rot = R.from_quat(current_ee_pose[3:])
+            target_rot = delta_rot * current_rot
+            target_quat = target_rot.as_quat()
+        else:
+            target_quat = current_ee_pose[3:]
+
+        target_ee_pose = np.concatenate([target_xyz, target_quat])
+
+        # 3. 获取夹爪位置
+        gripper = delta_action[-1]
+
+        return target_ee_pose, gripper
+
+    def ee_pose_to_joint(self, ee_pose, gripper):
+        """
+        使用 IK 将 EE pose 转换为关节位置。
+
+        Args:
+            ee_pose: [x, y, z, qx, qy, qz, qw] (7,)
+            gripper: Gripper position (0-100)
+
+        Returns:
+            joints: [gripper, j1, j2, j3, j4, j5, j6] (7,)
+        """
+        return self.env.arm_controller.get_q_by_ee_pos(
+            ee_pose[:3], ee_pose[3:], gripper
+        )
+
     def action(self, action: np.ndarray) -> np.ndarray:
         """
         Input:
@@ -324,15 +413,30 @@ class SpacemouseIntervention(gym.ActionWrapper):
         if flag:
             delta_action = np.zeros(7)
             if expert_a is not None:
-                delta_action[:-1] = self.compute_delta_pose(self.env.currpos, expert_a[:-1])
-                # delta_action[:-1] = self.compute_delta_pose(self.env.last_actor_action[:-1].copy(), expert_a[:-1].copy())
+                delta_action[:-1] = self.compute_delta_pose(
+                    self.env.currpos, expert_a[:-1]
+                )
                 delta_action[:3] = delta_action[:3] / self.action_scale[0]
                 delta_action[3:6] = delta_action[3:6] / self.action_scale[1]
                 delta_action[-1] = expert_a[-1] / 50.0 - 1
-                self.env.last_actor_action=expert_a.copy()
+
+                # 根据控制模式转换动作
+                if self.control_mode == "absolute_joint":
+                    # 将 delta EE pose 转换为绝对关节位置
+                    target_ee_pose, gripper = self.compute_target_ee_pose(delta_action)
+
+                    # 使用 IK 转换为关节位置
+                    joint_positions = self.ee_pose_to_joint(target_ee_pose, gripper)
+
+                    # 输出绝对关节位置 [j1, j2, j3, j4, j5, j6, gripper]
+                    # 注意：arm_controller.set_target 期望 [gripper, j1-j6]
+                    delta_action[:-1] = joint_positions[1:]  # 6个关节
+                    delta_action[-1] = gripper
+
+                self.env.last_actor_action = expert_a.copy()
             return delta_action, True
         if expert_a is not None:
-            self.env.last_actor_action=expert_a.copy()
+            self.env.last_actor_action = expert_a.copy()
         return action, False
 
     def step(self, action):
@@ -344,6 +448,7 @@ class SpacemouseIntervention(gym.ActionWrapper):
             info["intervene_action"] = new_action
 
         return obs, rew, done, truncated, info
+
 
 class DualSpacemouseIntervention(gym.ActionWrapper):
     def __init__(self, env, action_indices=None, gripper_enabled=True):
@@ -365,7 +470,6 @@ class DualSpacemouseIntervention(gym.ActionWrapper):
         intervened = False
         expert_a, buttons = self.expert.get_action()
         self.left1, self.left2, self.right1, self.right2 = tuple(buttons)
-
 
         if self.gripper_enabled:
             if self.left1:  # close gripper
@@ -414,7 +518,7 @@ class DualSpacemouseIntervention(gym.ActionWrapper):
         info["right1"] = self.right1
         info["right2"] = self.right2
         return obs, rew, done, truncated, info
-    
+
     def reset(self, **kwargs):
         return self.env.reset(**kwargs)
 
@@ -448,29 +552,30 @@ class GripperPenaltyWrapper(gym.RewardWrapper):
         self.last_gripper_pos = observation["state"][0, 0]
         return observation, reward, terminated, truncated, info
 
+
 class DualGripperPenaltyWrapper(gym.RewardWrapper):
     def __init__(self, env, penalty=0.1):
         super().__init__(env)
         assert env.action_space.shape == (14,)
         self.penalty = penalty
-        self.last_gripper_pos_left = 0 #TODO: this assume gripper starts opened
-        self.last_gripper_pos_right = 0 #TODO: this assume gripper starts opened
-    
+        self.last_gripper_pos_left = 0  # TODO: this assume gripper starts opened
+        self.last_gripper_pos_right = 0  # TODO: this assume gripper starts opened
+
     def reward(self, reward: float, action) -> float:
-        if (action[6] < -0.5 and self.last_gripper_pos_left==0):
+        if action[6] < -0.5 and self.last_gripper_pos_left == 0:
             reward -= self.penalty
             self.last_gripper_pos_left = 1
-        elif (action[6] > 0.5 and self.last_gripper_pos_left==1):
+        elif action[6] > 0.5 and self.last_gripper_pos_left == 1:
             reward -= self.penalty
             self.last_gripper_pos_left = 0
-        if (action[13] < -0.5 and self.last_gripper_pos_right==0):
+        if action[13] < -0.5 and self.last_gripper_pos_right == 0:
             reward -= self.penalty
             self.last_gripper_pos_right = 1
-        elif (action[13] > 0.5 and self.last_gripper_pos_right==1):
+        elif action[13] > 0.5 and self.last_gripper_pos_right == 1:
             reward -= self.penalty
             self.last_gripper_pos_right = 0
         return reward
-    
+
     def step(self, action):
         """Modifies the :attr:`env` :meth:`step` reward using :meth:`self.reward`."""
         observation, reward, terminated, truncated, info = self.env.step(action)

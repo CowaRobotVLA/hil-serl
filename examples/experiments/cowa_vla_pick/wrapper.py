@@ -71,6 +71,7 @@ class PickEnv(cowa_env):
             return False
 
     def reset(self, **kwargs):
+
         # Move above the target pose
         self._update_currpos()
         self.remote_flag = False
@@ -82,7 +83,7 @@ class PickEnv(cowa_env):
         # 等待用户输入
         self.go_next_round = False
         print("wait cmd to next round")
-        while not self.go_next_round:
+        while self.go_next_round == False:
             time.sleep(0.01)
         obs = self._get_obs()
         self.success = False
@@ -156,3 +157,70 @@ class GripperPenaltyWrapper(gym.Wrapper):
 
         self.last_gripper_pos = observation["state"][0, 6]
         return observation, reward, terminated, truncated, info
+
+
+##############################################################################
+# Joint Control Wrapper
+##############################################################################
+
+
+class JointControlWrapper(gym.Wrapper):
+    """
+    将 delta ee pose 控制转换为 6-DOF joint 控制的包装器。
+
+    Action space 转换:
+    - 原始：delta xyz (3) + delta quat (4) + gripper (1)
+    - 新的：joint positions (6) + gripper (1)
+
+    使用方式:
+        env = PickEnv(JointControlWrapper(cowa_env(config)))
+    """
+
+    def __init__(self, env):
+        super().__init__(env)
+
+        # 重写 action space 为 6-DOF joint + gripper (绝对角度)
+        self.action_space = gym.spaces.Box(
+            low=np.array([-np.pi] * 6 + [0], dtype=np.float32),
+            high=np.array([np.pi] * 6 + [100], dtype=np.float32),
+            shape=(7,),
+        )
+
+    def step(self, action):
+        """
+        执行一步，使用关节控制（绝对角度控制）。
+
+        Args:
+            action: 7 维动作向量
+                - 前 6 维：6 个关节的目标位置（绝对弧度）
+                - 第 7 维：夹爪开合度（0-100）
+        """
+        start_time = time.time()
+        action = np.clip(action, self.action_space.low, self.action_space.high)
+
+        # 绝对角度控制：直接使用目标关节位置
+        # 组合为 [gripper, joint1, joint2, joint3, joint4, joint5, joint6]
+        gripper_action = np.clip(action[6], 0, 100)
+        target_with_gripper = np.concatenate([[gripper_action], action[:6]])
+
+        # 发送关节控制命令
+        self.env.arm_controller.set_target(target_with_gripper)
+
+        # 等待控制周期
+        self.env.curr_path_length += 1
+        dt = time.time() - start_time
+        time.sleep(max(0, (1.0 / self.env.hz) - dt))
+
+        # 更新状态
+        self.env._update_currpos()
+        ob = self.env._get_obs()
+
+        # 计算奖励和结束条件
+        reward = self.env.compute_reward(ob)
+        done = (
+            self.env.curr_path_length >= self.env.max_episode_length
+            or reward
+            or self.env.terminate
+        )
+
+        return ob, int(reward), done, False, {"succeed": reward}
