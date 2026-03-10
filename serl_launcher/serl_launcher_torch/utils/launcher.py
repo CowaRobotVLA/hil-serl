@@ -1,18 +1,21 @@
 import torch
 import torch.nn as nn
-
 from agentlace.trainer import TrainerConfig
 
-# from serl_launcher_torch.common.typing import Batch, PRNGKey
-from serl_launcher_torch.common.wandb import WandBLogger
+from serl_launcher_torch.agents.continuous.pi05 import PI05Agent
+
 # from serl_launcher_torch.agents.continuous.bc import BCAgent
 from serl_launcher_torch.agents.continuous.sac import SACAgent
 from serl_launcher_torch.agents.continuous.sac_hybrid_single import SACAgentHybridSingleArm
-from serl_launcher_torch.agents.continuous.pi05 import PI05Agent
+
+# from serl_launcher_torch.common.typing import Batch, PRNGKey
+from serl_launcher_torch.common.wandb import WandBLogger
+
 # from serl_launcher_torch.agents.continuous.sac_hybrid_dual import SACAgentHybridDualArm
 from serl_launcher_torch.vision.data_augmentations import batched_random_crop
 
 ##############################################################################
+
 
 def make_sac_pixel_agent(
     seed: int,
@@ -26,7 +29,7 @@ def make_sac_pixel_agent(
     device: str = "cuda",
 ) -> SACAgent:
     torch.manual_seed(seed)
-    
+
     agent = SACAgent.create_pixels(
         sample_obs,
         sample_action,
@@ -117,10 +120,6 @@ def make_sac_pixel_agent_hybrid_single_arm(
 
 def make_pi05_agent(
     seed: int,
-    sample_obs: dict,
-    sample_action: torch.Tensor,
-    config_name: str = "pi05_libero",
-    num_images_in_input: int = 2,
     action_chunk: int = 5,
     action_env_dim: int = 7,
     num_steps: int = 10,
@@ -130,18 +129,15 @@ def make_pi05_agent(
     train_expert_only: bool = False,
     model_lr: float = 3e-4,
     discount: float = 0.97,
+    use_sac_model: bool = False,
     image_keys: tuple = ("image",),
     device: str = "cuda",
 ):
     """
     Create PI05 agent for reinforcement learning with pretrained vision-language-action model.
-    
+
     Args:
         seed: Random seed
-        sample_obs: Sample observation from environment
-        sample_action: Sample action from environment
-        config_name: Configuration name (pi05_libero, pi05_maniskill, etc.)
-        num_images_in_input: Number of images in input
         action_chunk: Number of actions to predict in chunk
         action_env_dim: Environment action dimension
         num_steps: Number of denoising steps
@@ -151,22 +147,19 @@ def make_pi05_agent(
         train_expert_only: Whether to train only expert model (freeze VLM)
         model_lr: Learning rate for model optimizer
         discount: Discount factor for RL
+        use_sac_model: Whether to build SAC OpenPI wrapper model
         image_keys: Keys for image observations
         device: Device to create agent on
-        
+
     Returns:
         PI05Agent instance
     """
     torch.manual_seed(seed)
-    
+
     # Create augmentation function
     augmentation_function = make_batch_augmentation_func(image_keys)
-    
+
     agent = PI05Agent.create(
-        sample_obs=sample_obs,
-        sample_action=sample_action,
-        config_name=config_name,
-        num_images_in_input=num_images_in_input,
         action_chunk=action_chunk,
         action_env_dim=action_env_dim,
         num_steps=num_steps,
@@ -176,11 +169,12 @@ def make_pi05_agent(
         train_expert_only=train_expert_only,
         model_lr=model_lr,
         discount=discount,
+        use_sac_model=use_sac_model,
         augmentation_function=augmentation_function,
         device=device,
         seed=seed,
     )
-    
+
     return agent
 
 
@@ -242,43 +236,40 @@ def linear_schedule(step):
     linear_step = min(step, decay_steps)
     decayed_value = init_value + (end_value - init_value) * (linear_step / decay_steps)
     return decayed_value
-    
+
+
 def make_batch_augmentation_func(image_keys: tuple) -> callable:
     def data_augmentation_fn(observations: dict, seed: int) -> dict:
         # Create a generator from the seed
         rng = torch.Generator()
         rng.manual_seed(seed)
-        
+
         for pixel_key in image_keys:
             if pixel_key in observations:
                 observations = {
                     **observations,
-                    pixel_key: batched_random_crop(
-                        observations[pixel_key], 
-                        rng=rng, 
-                        padding=4, 
-                        num_batch_dims=2
-                    )
+                    pixel_key: batched_random_crop(observations[pixel_key], rng=rng, padding=4, num_batch_dims=2),
                 }
         return observations
-    
+
     def augment_batch(batch: dict, seed: int) -> dict:
         # First unpack packed obs and next_obs if needed
         batch = _unpack(batch, image_keys)
-        
+
         obs_seed = seed
         next_obs_seed = seed + 1
-        
+
         obs = data_augmentation_fn(batch["observations"], obs_seed)
         next_obs = data_augmentation_fn(batch["next_observations"], next_obs_seed)
-        
+
         return {
             **batch,
             "observations": obs,
             "next_observations": next_obs,
         }
-    
+
     return augment_batch
+
 
 def _unpack(batch: dict, image_keys: tuple) -> dict:
     """
@@ -294,10 +285,10 @@ def _unpack(batch: dict, image_keys: tuple) -> dict:
                 # Packed format: (B, T+1, H, W, C) -> split into obs (B, T, H, W, C) and next_obs
                 obs = dict(batch["observations"])
                 next_obs = dict(batch["next_observations"])
-                
+
                 obs[pixel_key] = obs_pixels[:, :-1, ...]
                 next_obs[pixel_key] = obs_pixels[:, 1:, ...]
-                
+
                 batch = dict(batch)
                 batch["observations"] = obs
                 batch["next_observations"] = next_obs
@@ -310,6 +301,113 @@ def make_trainer_config(port_number: int = 1234, broadcast_port: int = 2233) -> 
         broadcast_port=broadcast_port,
         request_types=["send-stats"],
     )
+
+
+def preprocess_loss_inputs(
+    logprobs: torch.Tensor,
+    old_logprobs: torch.Tensor,
+    advantages: torch.Tensor,
+    logprob_type: str | None = None,
+    single_action_dim: int | None = None,
+    loss_mask: torch.Tensor | None = None,
+    loss_mask_sum: torch.Tensor | None = None,
+    values: torch.Tensor | None = None,
+    prev_values: torch.Tensor | None = None,
+    returns: torch.Tensor | None = None,
+    reward_type: str | None = None,
+    versions: torch.Tensor | None = None,
+    **kwargs,
+) -> dict:
+    if reward_type == "chunk_level":
+        advantages = advantages.flatten()
+        if loss_mask is not None:
+            loss_mask = loss_mask.flatten()
+        if loss_mask_sum is not None:
+            loss_mask_sum = loss_mask_sum.flatten()
+        if values is not None:
+            values = values.flatten()
+        if prev_values is not None:
+            prev_values = prev_values.flatten()
+        if returns is not None:
+            returns = returns.flatten()
+
+    bsz = logprobs.shape[0]
+    proximal_logprobs = kwargs.get("proximal_logprobs", None)
+    if logprob_type == "token_level":
+        # logprobs, old_logprobs: [bsz, num_action_chunks, action_dim] -> [bsz, num_action_chunks, action_dim]
+        logprobs = logprobs.reshape(bsz, -1, single_action_dim)
+        old_logprobs = old_logprobs.reshape(bsz, -1, single_action_dim)
+        if proximal_logprobs is not None:
+            proximal_logprobs = proximal_logprobs.reshape(bsz, -1, single_action_dim)
+        if versions is not None:
+            versions = versions.reshape(bsz, -1, single_action_dim)
+        advantages = advantages.unsqueeze(-1)
+        if loss_mask is not None:
+            loss_mask = loss_mask.unsqueeze(-1)
+        if loss_mask_sum is not None:
+            loss_mask_sum = loss_mask_sum.unsqueeze(-1)
+
+    elif logprob_type == "action_level":
+        # logprobs, old_logprobs: [bsz, num_action_chunks, action_dim] -> [bsz, num_action_chunks]
+        logprobs = logprobs.reshape(bsz, -1, single_action_dim).sum(dim=-1)
+        old_logprobs = old_logprobs.reshape(bsz, -1, single_action_dim).sum(dim=-1)
+        if proximal_logprobs is not None:
+            proximal_logprobs = proximal_logprobs.reshape(bsz, -1, single_action_dim).sum(dim=-1)
+        if versions is not None:
+            versions = versions.reshape(bsz, -1, single_action_dim)[..., 0]
+
+    elif logprob_type == "chunk_level":
+        # logprobs, old_logprobs: [bsz, num_action_chunks, action_dim] -> [bsz]
+        logprobs = logprobs.reshape(bsz, -1, single_action_dim).sum(dim=[1, 2])
+        old_logprobs = old_logprobs.reshape(bsz, -1, single_action_dim).sum(dim=[1, 2])
+        if proximal_logprobs is not None:
+            proximal_logprobs = proximal_logprobs.reshape(bsz, -1, single_action_dim).sum(dim=[1, 2])
+        if versions is not None:
+            versions = versions.reshape(bsz, -1, single_action_dim)[:, 0, 0]
+
+    target_shape = logprobs.shape
+    advantages = expand_to_target_dim(advantages, target_shape)
+    loss_mask = expand_to_target_dim(loss_mask, target_shape)
+    loss_mask_sum = expand_to_target_dim(loss_mask_sum, target_shape)
+    values = expand_to_target_dim(values, target_shape)
+    prev_values = expand_to_target_dim(prev_values, target_shape)
+    returns = expand_to_target_dim(returns, target_shape)
+    versions = expand_to_target_dim(versions, target_shape)
+
+    kwargs.update(
+        {
+            "logprobs": logprobs,
+            "old_logprobs": old_logprobs,
+            "proximal_logprobs": proximal_logprobs,
+            "versions": versions,
+            "advantages": advantages,
+            "loss_mask": loss_mask,
+            "loss_mask_sum": loss_mask_sum,
+            "values": values,
+            "prev_values": prev_values,
+            "returns": returns,
+        }
+    )
+
+    return kwargs
+
+
+def postprocess_loss_metric(metrics_data: dict) -> dict:
+    for k, v in metrics_data.items():
+        if isinstance(v, torch.Tensor):
+            metrics_data[k] = v.detach().item()
+        elif isinstance(v, (float, int)):
+            metrics_data[k] = v
+    return metrics_data
+
+
+def expand_to_target_dim(tensor, target_shape):
+    if tensor is None:
+        return None
+    if tensor.shape != target_shape:
+        while len(tensor.shape) < len(target_shape):
+            tensor = tensor.unsqueeze(-1)
+    return tensor
 
 
 def make_wandb_logger(
