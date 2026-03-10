@@ -16,6 +16,7 @@ import numpy as np
 from typing import Dict, Any
 import sys
 import os
+import serl_launcher_torch.agents.continuous.pi05 as pi05_module
 
 # Add parent directory to path so we can import serl_launcher_torch
 sys.path.append(".")
@@ -23,7 +24,9 @@ sys.path.append(".")
 from serl_launcher_torch.agents.continuous.pi05 import PI05Agent
 from serl_launcher_torch.networks.RLinf_plug.openpi.openpi_action_model import (
     OpenPi0ForRLActionPrediction,
-    OpenPi0Config,
+)
+from serl_launcher_torch.networks.RLinf_plug.openpi.openpi_action_sac_model import (
+    OpenPi0ForSACActionPrediction,
 )
 
 
@@ -97,7 +100,10 @@ class TestPI05AgentCreation:
         )
 
         assert agent is not None
-        assert isinstance(agent.model, OpenPi0ForRLActionPrediction)
+        assert isinstance(
+            agent.model,
+            (OpenPi0ForRLActionPrediction, OpenPi0ForSACActionPrediction),
+        )
         assert agent.config["action_chunk"] == 5
         assert agent.config["num_steps"] == 10
         assert agent._training is True
@@ -137,7 +143,7 @@ class TestPI05AgentCreation:
     def test_create_agent_different_action_dims(self):
         """Test creating agent with different action dimensions."""
         sample_obs = create_sample_obs()
-        
+
         # Test with action_dim = 4
         sample_action_4d = create_sample_action(action_dim=4)
         agent_4d = PI05Agent.create(
@@ -156,9 +162,79 @@ class TestPI05AgentCreation:
         )
         assert agent_10d.model.config.action_dim == 10
 
+    def test_create_agent_use_sac_model_switch(self, monkeypatch):
+        sample_obs = create_sample_obs()
+        sample_action = create_sample_action()
+
+        class _DummyModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = torch.nn.Parameter(torch.ones(1))
+
+        calls = {"default": 0, "sac": 0}
+
+        def _fake_get_model(_cfg):
+            calls["default"] += 1
+            return _DummyModel()
+
+        def _fake_get_sac_model(_cfg):
+            calls["sac"] += 1
+            return _DummyModel()
+
+        monkeypatch.setattr(pi05_module, "get_model", _fake_get_model)
+        monkeypatch.setattr(pi05_module, "get_sac_model", _fake_get_sac_model)
+
+        agent_default = PI05Agent.create(
+            sample_obs=sample_obs,
+            sample_action=sample_action,
+            use_sac_model=False,
+            device="cpu",
+        )
+        assert isinstance(agent_default, PI05Agent)
+        assert calls["default"] == 1
+        assert calls["sac"] == 0
+
+        agent_sac = PI05Agent.create(
+            sample_obs=sample_obs,
+            sample_action=sample_action,
+            use_sac_model=True,
+            device="cpu",
+        )
+        assert isinstance(agent_sac, PI05Agent)
+        assert calls["default"] == 1
+        assert calls["sac"] == 1
+        assert agent_sac.config["use_sac_model"] is True
+
 
 class TestPI05AgentForward:
     """Test PI05Agent forward pass and loss computation."""
+
+    def test_policy_loss_keeps_wrapper_responsibility(self):
+        class _DummyLossModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = torch.nn.Parameter(torch.ones(1))
+
+            def prepare_batch_for_training(self, batch, config):
+                return batch
+
+            def compute_training_loss(self, batch, config, device):
+                loss = self.w.sum() * 0 + torch.tensor(1.0, device=device)
+                info = {
+                    "policy_loss": torch.tensor(1.0, device=device),
+                    "aux_metric": torch.tensor(2.0, device=device),
+                }
+                return loss, info
+
+        model = _DummyLossModel()
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        agent = PI05Agent(model=model, model_optimizer=optimizer, config={})
+
+        loss, info = agent.policy_loss(batch={"x": torch.tensor([1.0])})
+
+        assert torch.is_tensor(loss)
+        assert isinstance(info["policy_loss"], float)
+        assert isinstance(info["aux_metric"], float)
 
     def test_model_loss_fn_basic(self):
         """Test basic loss computation."""
@@ -280,7 +356,7 @@ class TestPI05AgentUpdate:
 
         batch = create_batch()
         agent.train()
-        
+
         # Update only model
         info = agent.update(batch, networks_to_update=frozenset({"model"}))
         assert "policy_loss" in info
@@ -316,14 +392,14 @@ class TestPI05AgentUpdate:
 
         batch = create_batch()
         agent.eval()
-        
+
         # Get initial model parameters
         initial_params = next(agent.model.parameters()).clone()
-        
+
         # Update in eval mode (should not update due to no_grad in sample_actions)
         # Note: update() should still work but model should be in eval mode
         info = agent.update(batch)
-        
+
         # Parameters might change but model should be in eval mode
         assert agent.model.training is False
 
@@ -380,7 +456,7 @@ class TestPI05AgentSampling:
 
         obs = create_sample_obs(batch_size=2)
         obs["task_descriptions"] = ["pick_up_block", "place_in_box"]
-        
+
         agent.eval()
         actions = agent.sample_actions(obs, mode="eval")
 
@@ -399,10 +475,10 @@ class TestPI05AgentSampling:
 
         obs = create_sample_obs()
         agent.eval()
-        
+
         with torch.no_grad():
             actions = agent.sample_actions(obs)
-        
+
         assert not actions.requires_grad
 
 
@@ -449,9 +525,7 @@ class TestPI05AgentStateDict:
         agent2.load_state_dict(state_dict)
 
         # Check parameters match
-        for (name1, param1), (name2, param2) in zip(
-            agent1.model.named_parameters(), agent2.model.named_parameters()
-        ):
+        for (name1, param1), (name2, param2) in zip(agent1.model.named_parameters(), agent2.model.named_parameters()):
             assert name1 == name2
             assert torch.allclose(param1, param2)
 
@@ -493,7 +567,7 @@ class TestPI05AgentDevice:
         # Move to CPU (should work even if already on CPU)
         agent = agent.to("cpu")
         assert agent.device.type == "cpu"
-        
+
         # Check model is on correct device
         assert next(agent.model.parameters()).device.type == "cpu"
 

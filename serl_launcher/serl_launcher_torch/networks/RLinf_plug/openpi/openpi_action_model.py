@@ -21,6 +21,7 @@ from typing import Any, Literal
 import jax
 import numpy as np
 import torch
+import torch.nn.functional as F
 from openpi import transforms as _transforms
 from openpi.models import model as _model
 from openpi.models.pi0_config import Pi0Config
@@ -34,19 +35,17 @@ from serl_launcher_torch.networks.RLinf_plug.modules.value_head import ValueHead
 @dataclass(frozen=True)
 class OpenPi0Config(Pi0Config):
     # config for rl
-    config_name: str = "pi0_libero"  # pi0_libero, pi05_libero, pi0_maniskill, pi05_maniskill, pi0_metaworld, pi05_metaworld
+    config_name: str = (
+        "pi0_libero"  # pi0_libero, pi05_libero, pi0_maniskill, pi05_maniskill, pi0_metaworld, pi05_metaworld
+    )
     num_images_in_input: int = 2  # number of images in input
     noise_method: str = "flow_sde"  # flow_sde, flow_noise, flow_cps
     # noise config for flow-sde
     noise_level: float = 0.5
     noise_anneal: bool = False
-    noise_params: list = field(
-        default_factory=lambda: [0.7, 0.3, 400]
-    )  # noise_start, noise_end, noise_anneal_steps
+    noise_params: list = field(default_factory=lambda: [0.7, 0.3, 400])  # noise_start, noise_end, noise_anneal_steps
     # noise config for flow-noise
-    noise_logvar_range: list = field(
-        default_factory=lambda: [0.08, 0.16]
-    )  # [min_std, max_std]
+    noise_logvar_range: list = field(default_factory=lambda: [0.08, 0.16])  # [min_std, max_std]
     # hyper-parameters
     action_chunk: int = 5  # action chunk
     action_env_dim: int = 7  # for environment action dim
@@ -140,9 +139,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
                 activation=value_head_activation,
                 bias_last=True,
             )
-            self.value_head = self.value_head.to(
-                dtype=self.action_out_proj.weight.dtype
-            )
+            self.value_head = self.value_head.to(dtype=self.action_out_proj.weight.dtype)
         self.use_vlm_value = getattr(self.config, "value_after_vlm", False) and getattr(
             self.config, "add_value_head", False
         )
@@ -156,9 +153,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
                 noise_logvar_range=self.config.noise_logvar_range,
                 noise_scheduler_type="learn",
             )
-            self.noise_head = self.noise_head.to(
-                dtype=self.action_out_proj.weight.dtype
-            )
+            self.noise_head = self.noise_head.to(dtype=self.action_out_proj.weight.dtype)
 
         for name, module in self.named_modules():
             # Set _fsdp_wrap_name to the last part of the path (e.g., "model.action_in_proj" -> "action_in_proj")
@@ -215,9 +210,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             if transpose:
                 # convert from [3,256,256] -> [256,256,3]
                 sample = jax.tree.map(
-                    lambda x: x.transpose(1, 2, 0)
-                    if len(x.shape) == 3 and transpose
-                    else x,
+                    lambda x: x.transpose(1, 2, 0) if len(x.shape) == 3 and transpose else x,
                     sample,
                 )
             else:
@@ -280,9 +273,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         # input transform
         observation = self.input_transform(data, transpose=False)
         observation = _model.Observation.from_dict(observation)
-        images, img_masks, lang_tokens, lang_masks, state = (
-            self._preprocess_observation(observation, train=False)
-        )
+        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=False)
         # transfer to device
         device = chains.device
         images = [img.to(device) for img in images]
@@ -299,17 +290,11 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             denoise_inds,
             compute_values,
         )
-        log_probs = log_probs[
-            :, :, : self.config.action_chunk, : self.config.action_env_dim
-        ]
-        entropy = entropy[
-            :, :, : self.config.action_chunk, : self.config.action_env_dim
-        ]
+        log_probs = log_probs[:, :, : self.config.action_chunk, : self.config.action_env_dim]
+        entropy = entropy[:, :, : self.config.action_chunk, : self.config.action_env_dim]
         # post process
         log_probs = log_probs.mean(dim=1)
-        entropy = entropy.mean(dim=[1, 2, 3], keepdim=False)[
-            :, None
-        ]  # [:,None] to align with loss-mask shape
+        entropy = entropy.mean(dim=[1, 2, 3], keepdim=False)[:, None]  # [:,None] to align with loss-mask shape
         value_t = value_t.mean(dim=-1, keepdim=False)
         return {
             "logprobs": log_probs,
@@ -345,19 +330,14 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         for key, value in processed_obs.items():
             if isinstance(value, list):
                 processed_obs[key] = [
-                    item.to(device=device).contiguous()
-                    if torch.is_tensor(item)
-                    else item
-                    for item in value
+                    item.to(device=device).contiguous() if torch.is_tensor(item) else item for item in value
                 ]
             elif torch.is_tensor(value):
                 processed_obs[key] = value.to(device=device).contiguous()
             elif isinstance(value, dict):
                 for sub_key, sub_value in value.items():
                     if torch.is_tensor(sub_value):
-                        processed_obs[key][sub_key] = sub_value.to(
-                            device=device
-                        ).contiguous()
+                        processed_obs[key][sub_key] = sub_value.to(device=device).contiguous()
         return processed_obs
 
     def predict_action_batch(
@@ -368,19 +348,11 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         return_obs=True,
     ) -> tuple[np.ndarray, dict[str, Any]]:
         to_process_obs = self.obs_processor(env_obs)  # env obs -> policy input obs
-        processed_obs = self.input_transform(
-            to_process_obs, transpose=False
-        )  # policy input obs -> model input obs
-        processed_obs = self.precision_processor(
-            processed_obs
-        )  # obs precision processor
+        processed_obs = self.input_transform(to_process_obs, transpose=False)  # policy input obs -> model input obs
+        processed_obs = self.precision_processor(processed_obs)  # obs precision processor
         observation = _model.Observation.from_dict(processed_obs)
-        outputs = self.sample_actions(
-            observation, mode=mode, compute_values=compute_values
-        )
-        actions = self.output_transform(
-            {"actions": outputs["actions"], "state": observation.state}
-        )["actions"].numpy()
+        outputs = self.sample_actions(observation, mode=mode, compute_values=compute_values)
+        actions = self.output_transform({"actions": outputs["actions"], "state": observation.state})["actions"].numpy()
 
         forward_inputs = {
             "chains": outputs["chains"],
@@ -413,13 +385,9 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
             noise = self.sample_noise(actions_shape, device)
 
-        images, img_masks, lang_tokens, lang_masks, state = (
-            self._preprocess_observation(observation, train=False)
-        )
+        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=False)
 
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
-            images, img_masks, lang_tokens, lang_masks
-        )
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
 
@@ -446,9 +414,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         if self.use_vlm_value:
             values_vlm = self.get_value_from_vlm(prefix_output)
         if self.config.joint_logprob:
-            initial_log_prob = self.get_logprob_norm(
-                x_t, torch.zeros_like(noise), torch.ones_like(noise)
-            )
+            initial_log_prob = self.get_logprob_norm(x_t, torch.zeros_like(noise), torch.ones_like(noise))
             log_probs.append(initial_log_prob)
 
         # In the joint logprob mode, we need to sample the logprob for each denoise step
@@ -459,13 +425,9 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
                 denoise_inds = torch.arange(num_steps)
             else:
                 if self.config.ignore_last:
-                    denoise_inds = torch.tensor(
-                        [random.randint(0, num_steps - 2)] * num_steps
-                    )
+                    denoise_inds = torch.tensor([random.randint(0, num_steps - 2)] * num_steps)
                 else:
-                    denoise_inds = torch.tensor(
-                        [random.randint(0, num_steps - 1)] * num_steps
-                    )
+                    denoise_inds = torch.tensor([random.randint(0, num_steps - 1)] * num_steps)
         else:
             denoise_inds = torch.tensor([-1] * num_steps)
         denoise_inds = denoise_inds[None].repeat(bsize, 1)
@@ -497,9 +459,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         x_0 = x_t
         chains = torch.stack(chains, dim=1)
         # post process for logprob
-        log_probs = torch.stack(log_probs, dim=1)[
-            :, :, : self.config.action_chunk, : self.config.action_env_dim
-        ]
+        log_probs = torch.stack(log_probs, dim=1)[:, :, : self.config.action_chunk, : self.config.action_env_dim]
         if self.config.joint_logprob:
             log_probs = log_probs.mean(dim=1)
         else:
@@ -544,12 +504,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         if self.config.noise_anneal:
             # noise annealing
             noise_start, noise_end, anneal_steps = self.config.noise_params
-            noise_level = (
-                noise_start
-                + (noise_end - noise_start)
-                * min(self.global_step, anneal_steps)
-                / anneal_steps
-            )
+            noise_level = noise_start + (noise_end - noise_start) * min(self.global_step, anneal_steps) / anneal_steps
             noise_level = torch.tensor(noise_level).to(device)
         else:
             # fixed noise level
@@ -571,16 +526,10 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             suffix_out.to(dtype=self.action_out_proj.weight.dtype)
         )  # [bs,n_action_steps,max_action_dim]
         # value prediction
-        if (
-            self.config.add_value_head
-            and compute_values
-            and not self.config.value_after_vlm
-        ):
+        if self.config.add_value_head and compute_values and not self.config.value_after_vlm:
             # use chunk critic input
             if self.config.chunk_critic_input:
-                suffix_out_value = torch.mean(
-                    suffix_out[:, : self.config.action_chunk], dim=1, keepdim=False
-                )
+                suffix_out_value = torch.mean(suffix_out[:, : self.config.action_chunk], dim=1, keepdim=False)
             else:
                 suffix_out_value = torch.mean(suffix_out, dim=1, keepdim=False)
             # detach critic input
@@ -602,10 +551,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             if self.config.noise_method == "flow_sde":
                 sigmas = (
                     noise_level
-                    * torch.sqrt(
-                        timesteps
-                        / (1 - torch.where(timesteps == 1, timesteps[1], timesteps))
-                    )[:-1]
+                    * torch.sqrt(timesteps / (1 - torch.where(timesteps == 1, timesteps[1], timesteps)))[:-1]
                 )
                 sigma_i = sigmas[idx][:, None, None].expand_as(x_t)
                 x0_weight = torch.ones_like(t_input) - (t_input - delta)
@@ -621,9 +567,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             elif self.config.noise_method == "flow_noise":
                 x0_weight = 1 - (t_input - delta)
                 x1_weight = t_input - delta
-                x_t_std = self.noise_head(
-                    suffix_out.to(dtype=self.action_out_proj.weight.dtype)
-                )
+                x_t_std = self.noise_head(suffix_out.to(dtype=self.action_out_proj.weight.dtype))
             else:
                 raise ValueError(f"Invalid noise method: {self.config.noise_method}")
         x_t_mean = x0_pred * x0_weight + x1_pred * x1_weight
@@ -638,17 +582,13 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         timestep,
     ):
         """Apply one denoising step of the noise `x_t` at a given timestep."""
-        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = (
-            self.embed_suffix(state, x_t, timestep)
-        )
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, timestep)
 
         suffix_len = suffix_pad_masks.shape[1]
         batch_size = prefix_pad_masks.shape[0]
         prefix_len = prefix_pad_masks.shape[1]
 
-        prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(
-            batch_size, suffix_len, prefix_len
-        )
+        prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(batch_size, suffix_len, prefix_len)
 
         suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
 
@@ -659,9 +599,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
 
         # Prepare attention masks
         full_att_2d_masks_4d = self._prepare_attention_masks_4d(full_att_2d_masks)
-        self.paligemma_with_expert.gemma_expert.model.config._attn_implementation = (
-            "eager"  # noqa: SLF001
-        )
+        self.paligemma_with_expert.gemma_expert.model.config._attn_implementation = "eager"  # noqa: SLF001
 
         outputs_embeds, _ = self.paligemma_with_expert.forward(
             attention_mask=full_att_2d_masks_4d,
@@ -685,9 +623,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         else:
             mask = sigma == 0
             sigma_safe = torch.where(mask, torch.ones_like(sigma), sigma)
-            constant_term = -torch.log(sigma_safe) - 0.5 * torch.log(
-                2 * torch.pi * torch.ones_like(sample)
-            )
+            constant_term = -torch.log(sigma_safe) - 0.5 * torch.log(2 * torch.pi * torch.ones_like(sample))
             exponent_term = -0.5 * torch.pow((sample - mu) / sigma_safe, 2)
             log_prob = constant_term + exponent_term
             log_prob = torch.where(mask, torch.zeros_like(log_prob), log_prob)
@@ -695,6 +631,104 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
 
     def preprocess_for_train(self, data):
         return data
+
+    def prepare_batch_for_training(
+        self,
+        batch: dict[str, Any],
+        config: dict[str, Any],
+    ) -> dict[str, Any]:
+        obs_keys = batch["observations"]
+        actions = batch["actions"]
+        rewards = batch["rewards"]
+        masks = batch["masks"]
+
+        obs_dict = {}
+        for key in obs_keys:
+            if "image" in key.lower() or "state" in key.lower():
+                obs_dict[key] = obs_keys[key]
+
+        if "task_descriptions" in obs_keys:
+            obs_dict["task_descriptions"] = obs_keys["task_descriptions"]
+        elif "prompt" in obs_keys:
+            obs_dict["task_descriptions"] = obs_keys["prompt"]
+
+        if actions.ndim == 2:
+            action_chunk = config.get("action_chunk", self.config.action_chunk)
+            actions = actions.unsqueeze(1).repeat(1, action_chunk, 1)
+
+        model_input = {
+            "observation": obs_dict,
+            "actions": actions,
+            "rewards": rewards,
+            "masks": masks,
+        }
+
+        batch_size = actions.shape[0]
+        num_steps = config.get("num_steps", self.config.num_steps)
+        if config.get("joint_logprob", False):
+            denoise_inds = torch.arange(num_steps).unsqueeze(0).repeat(batch_size, 1)
+        else:
+            if config.get("ignore_last", False):
+                denoise_inds = torch.randint(0, num_steps - 1, (batch_size, 1))
+            else:
+                denoise_inds = torch.randint(0, num_steps, (batch_size, 1))
+
+        model_input["denoise_inds"] = denoise_inds
+        model_input["chains"] = actions
+        return model_input
+
+    def compute_training_loss(
+        self,
+        batch: dict[str, Any],
+        config: dict[str, Any],
+        device: torch.device,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        model_input = self.prepare_batch_for_training(batch=batch, config=config)
+
+        for key, value in list(model_input.items()):
+            if isinstance(value, torch.Tensor):
+                model_input[key] = value.to(device)
+            elif isinstance(value, dict):
+                model_input[key] = {
+                    sub_key: sub_value.to(device) if torch.is_tensor(sub_value) else sub_value
+                    for sub_key, sub_value in value.items()
+                }
+
+        self.set_global_step(config.get("global_step", 0))
+        outputs = self.default_forward(
+            data=model_input,
+            compute_values=config.get("add_value_head", False),
+        )
+
+        log_probs = outputs["logprobs"]
+        values = outputs["values"]
+        entropy = outputs.get("entropy", None)
+        policy_loss = -log_probs.mean()
+
+        value_loss = torch.tensor(0.0, device=device)
+        if config.get("add_value_head", False):
+            rewards = batch["rewards"].to(device)
+            masks = batch["masks"].to(device)
+            discount = config.get("discount", 0.97)
+            with torch.no_grad():
+                target_values = rewards + discount * masks * values
+            value_loss = F.mse_loss(values.squeeze(), target_values.squeeze())
+
+        total_loss = policy_loss
+        if config.get("add_value_head", False):
+            total_loss = total_loss + config.get("value_coef", 1.0) * value_loss
+
+        info: dict[str, float] = {
+            "policy_loss": policy_loss.item(),
+            "log_probs_mean": log_probs.mean().item(),
+            "log_probs_std": log_probs.std().item(),
+        }
+        if config.get("add_value_head", False):
+            info["value_loss"] = value_loss.item()
+            info["values_mean"] = values.mean().item()
+        if entropy is not None:
+            info["entropy"] = entropy.mean().item()
+        return total_loss, info
 
     def get_log_prob_value(
         self,
@@ -708,9 +742,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         compute_values=False,
     ):
         bsize = state.shape[0]
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
-            images, img_masks, lang_tokens, lang_masks
-        )
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
 

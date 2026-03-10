@@ -1,16 +1,128 @@
 from collections.abc import Callable
+from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
-from serl_launcher_torch.networks.RLinf_plug.openpi import get_model
+from serl_launcher_torch.networks.RLinf_plug.openpi import get_model, get_sac_model
 from serl_launcher_torch.networks.RLinf_plug.openpi.openpi_action_model import (
     OpenPi0ForRLActionPrediction,
 )
-from serl_launcher_torch.networks.actor_critic_nets import Critic
+from serl_launcher_torch.networks.RLinf_plug.openpi.openpi_action_sac_model import (
+    OpenPi0ForSACActionPrediction,
+)
 from torch.amp import GradScaler, autocast
+
+
+def _expand_to_target_dim(
+    tensor: torch.Tensor | None,
+    target_shape: torch.Size,
+) -> torch.Tensor | None:
+    if tensor is None:
+        return None
+    tensor_out = tensor
+    if tensor_out.shape != target_shape:
+        while len(tensor_out.shape) < len(target_shape):
+            tensor_out = tensor_out.unsqueeze(-1)
+    return tensor_out
+
+
+def _preprocess_loss_inputs(
+    logprobs: torch.Tensor,
+    old_logprobs: torch.Tensor,
+    advantages: torch.Tensor,
+    logprob_type: str | None = None,
+    single_action_dim: int | None = None,
+    loss_mask: torch.Tensor | None = None,
+    loss_mask_sum: torch.Tensor | None = None,
+    values: torch.Tensor | None = None,
+    prev_values: torch.Tensor | None = None,
+    returns: torch.Tensor | None = None,
+    reward_type: str | None = None,
+    versions: torch.Tensor | None = None,
+    **kwargs,
+) -> dict:
+    if reward_type == "chunk_level":
+        advantages = advantages.flatten()
+        if loss_mask is not None:
+            loss_mask = loss_mask.flatten()
+        if loss_mask_sum is not None:
+            loss_mask_sum = loss_mask_sum.flatten()
+        if values is not None:
+            values = values.flatten()
+        if prev_values is not None:
+            prev_values = prev_values.flatten()
+        if returns is not None:
+            returns = returns.flatten()
+
+    bsz = logprobs.shape[0]
+    proximal_logprobs = kwargs.get("proximal_logprobs", None)
+    if logprob_type == "token_level":
+        if single_action_dim is None:
+            raise ValueError("single_action_dim is required for token_level logprob_type")
+        logprobs = logprobs.reshape(bsz, -1, single_action_dim)
+        old_logprobs = old_logprobs.reshape(bsz, -1, single_action_dim)
+        if proximal_logprobs is not None:
+            proximal_logprobs = proximal_logprobs.reshape(bsz, -1, single_action_dim)
+        if versions is not None:
+            versions = versions.reshape(bsz, -1, single_action_dim)
+        advantages = advantages.unsqueeze(-1)
+        if loss_mask is not None:
+            loss_mask = loss_mask.unsqueeze(-1)
+        if loss_mask_sum is not None:
+            loss_mask_sum = loss_mask_sum.unsqueeze(-1)
+    elif logprob_type == "action_level":
+        if single_action_dim is None:
+            raise ValueError("single_action_dim is required for action_level logprob_type")
+        logprobs = logprobs.reshape(bsz, -1, single_action_dim).sum(dim=-1)
+        old_logprobs = old_logprobs.reshape(bsz, -1, single_action_dim).sum(dim=-1)
+        if proximal_logprobs is not None:
+            proximal_logprobs = proximal_logprobs.reshape(bsz, -1, single_action_dim).sum(dim=-1)
+        if versions is not None:
+            versions = versions.reshape(bsz, -1, single_action_dim)[..., 0]
+    elif logprob_type == "chunk_level":
+        if single_action_dim is None:
+            raise ValueError("single_action_dim is required for chunk_level logprob_type")
+        logprobs = logprobs.reshape(bsz, -1, single_action_dim).sum(dim=[1, 2])
+        old_logprobs = old_logprobs.reshape(bsz, -1, single_action_dim).sum(dim=[1, 2])
+        if proximal_logprobs is not None:
+            proximal_logprobs = proximal_logprobs.reshape(bsz, -1, single_action_dim).sum(dim=[1, 2])
+        if versions is not None:
+            versions = versions.reshape(bsz, -1, single_action_dim)[:, 0, 0]
+
+    target_shape = logprobs.shape
+    advantages = _expand_to_target_dim(advantages, target_shape)
+    loss_mask = _expand_to_target_dim(loss_mask, target_shape)
+    loss_mask_sum = _expand_to_target_dim(loss_mask_sum, target_shape)
+    values = _expand_to_target_dim(values, target_shape)
+    prev_values = _expand_to_target_dim(prev_values, target_shape)
+    returns = _expand_to_target_dim(returns, target_shape)
+    versions = _expand_to_target_dim(versions, target_shape)
+
+    kwargs.update(
+        {
+            "logprobs": logprobs,
+            "old_logprobs": old_logprobs,
+            "proximal_logprobs": proximal_logprobs,
+            "versions": versions,
+            "advantages": advantages,
+            "loss_mask": loss_mask,
+            "loss_mask_sum": loss_mask_sum,
+            "values": values,
+            "prev_values": prev_values,
+            "returns": returns,
+        }
+    )
+    return kwargs
+
+
+def _postprocess_loss_metric(metrics_data: dict) -> dict:
+    for key, value in metrics_data.items():
+        if isinstance(value, torch.Tensor):
+            metrics_data[key] = value.detach().item()
+        elif isinstance(value, (float, int)):
+            metrics_data[key] = value
+    return metrics_data
 
 
 class PI05Agent:
@@ -26,13 +138,8 @@ class PI05Agent:
 
     def __init__(
         self,
-        model: OpenPi0ForRLActionPrediction,
+        model: OpenPi0ForRLActionPrediction | OpenPi0ForSACActionPrediction,
         model_optimizer: torch.optim.Optimizer,
-        q1: nn.Module,
-        q2: nn.Module,
-        q1_target: nn.Module,
-        q2_target: nn.Module,
-        q_optimizer: torch.optim.Optimizer,
         config: dict,
     ):
         self.model = model
@@ -40,18 +147,6 @@ class PI05Agent:
         self.config = config
         self.device = next(model.parameters()).device
         self._training = True
-
-        # Twin Q-networks for SAC
-        self.q1 = q1
-        self.q2 = q2
-        self.q1_target = q1_target
-        self.q2_target = q2_target
-        self.q_optimizer = q_optimizer
-
-        # Entropy temperature (alpha)
-        self.log_alpha = torch.zeros(1, device=self.device)
-        self.log_alpha.requires_grad = True
-        self.target_entropy = -config.get("action_env_dim", 7)  # -|A| as target
 
         self.scaler = GradScaler()
 
@@ -106,231 +201,36 @@ class PI05Agent:
         return result
 
     def _prepare_batch_for_model(self, batch: dict[str, torch.Tensor]) -> dict:
-        """
-        Prepare batch data for PI05 model input.
-        Converts standard RL batch format to PI05 observation format.
-        """
-        # Extract observations and actions
-        obs_keys = batch["observations"]
-        next_obs_keys = batch["next_observations"]
-        actions = batch["actions"]
-        rewards = batch["rewards"]
-        masks = batch["masks"]
+        return self.model.prepare_batch_for_training(batch=batch, config=self.config)
 
-        # Build observation dict for PI05
-        # PI05 expects observations with images, states, and task descriptions
-        obs_dict = {}
+    def policy_loss(
+        self,
+        batch: dict[str, torch.Tensor] | None = None,
+        **kwargs,
+    ) -> tuple[torch.Tensor, dict]:
+        if kwargs:
+            kwargs = _preprocess_loss_inputs(**kwargs)
+            if "batch" in kwargs and isinstance(kwargs["batch"], dict):
+                batch = kwargs["batch"]
 
-        # Copy image observations
-        for key in obs_keys:
-            if "image" in key.lower() or "state" in key.lower():
-                obs_dict[key] = obs_keys[key]
+        if batch is None:
+            raise ValueError("policy_loss requires either `batch` or keyword loss inputs.")
 
-        # Add task descriptions if available
-        if "task_descriptions" in obs_keys:
-            obs_dict["task_descriptions"] = obs_keys["task_descriptions"]
-        elif "prompt" in obs_keys:
-            obs_dict["task_descriptions"] = obs_keys["prompt"]
-
-        # Ensure proper shape for actions: [batch, action_chunk, action_dim]
-        action_shape = actions.shape
-        if len(action_shape) == 2:
-            # If actions are [batch, action_dim], need to add action_chunk dimension
-            # This assumes single-step actions, will need to be expanded
-            batch_size = action_shape[0]
-            action_dim = action_shape[1]
-            action_chunk = self.config.get("action_chunk", 5)
-            # Repeat action for action_chunk steps
-            actions = actions.unsqueeze(1).repeat(1, action_chunk, 1)
-
-        # Build model input dict
-        model_input = {
-            "observation": obs_dict,
-            "actions": actions,
-            "rewards": rewards,
-            "masks": masks,
-        }
-
-        # Add denoise_inds for training (required by PI05)
-        batch_size = actions.shape[0]
-        num_steps = self.config.get("num_steps", 10)
-
-        if self.config.get("joint_logprob", False):
-            # For joint logprob, use all denoise steps
-            denoise_inds = torch.arange(num_steps).unsqueeze(0).repeat(batch_size, 1)
-        else:
-            # For single step, sample random denoise index
-            if self.config.get("ignore_last", False):
-                denoise_inds = torch.randint(0, num_steps - 1, (batch_size, 1))
-            else:
-                denoise_inds = torch.randint(0, num_steps, (batch_size, 1))
-
-        model_input["denoise_inds"] = denoise_inds
-        model_input["chains"] = actions  # Initial action chain
-
-        return model_input
-
-    def _update_target_networks(self, tau: float = 0.005):
-        """Soft update target Q-networks."""
-        for target_param, param in zip(self.q1_target.parameters(), self.q1.parameters()):
-            target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
-        for target_param, param in zip(self.q2_target.parameters(), self.q2.parameters()):
-            target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
-
-    def _get_q_values(self, observations: dict, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Get Q-values from twin Q-networks."""
-        # Flatten observations for critic
-        obs_features = []
-        for k, v in observations.items():
-            if "image" in k.lower():
-                # For image observations, use global average pooling
-                if len(v.shape) == 5:  # [B, T, C, H, W]
-                    v = v.mean(dim=1)  # [B, C, H, W]
-                obs_features.append(v.flatten(1))
-            elif "state" in k.lower():
-                obs_features.append(v)
-
-        if obs_features:
-            obs_flat = torch.cat(obs_features, dim=1)
-        else:
-            # Fallback: just use any available tensor
-            obs_flat = list(observations.values())[0]
-            if len(obs_flat.shape) > 2:
-                obs_flat = obs_flat.flatten(1)
-
-        # Ensure actions match batch size
-        if len(actions.shape) == 3:  # [B, action_chunk, dim]
-            actions = actions[:, 0, :]  # [B, dim]
-
-        q1_vals = self.q1(obs_flat, actions)
-        q2_vals = self.q2(obs_flat, actions)
-        return q1_vals, q2_vals
+        loss, metrics_data = self.model_loss_fn(batch=batch)
+        metrics_data = _postprocess_loss_metric(metrics_data)
+        return loss, metrics_data
 
     def model_loss_fn(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, dict]:
-        """
-        Compute PI05 model loss using standard SAC algorithm.
-
-        SAC Loss Components:
-        1. Q-loss: MSE(Q(s,a), r + γ * Q_target(s',a'))
-        2. Policy loss: α * log π(a|s) - min(Q1(s,a), Q2(s,a))
-        3. Alpha loss: -α * (log π + target_entropy)
-        """
-        # Move batch to device
-        batch = self._move_batch_to_device(batch)
-
-        observations = batch["observations"]
-        next_observations = batch["next_observations"]
-        actions = batch["actions"]  # [B, action_dim] or [B, action_chunk, action_dim]
-        rewards = batch["rewards"]  # [B]
-        masks = batch["masks"]  # [B]
-        discount = self.config.get("discount", 0.97)
-
-        # === Q-FUNCTION LOSS (Critic) ===
-        # Get Q-values for current (s, a)
-        q1_vals, q2_vals = self._get_q_values(observations, actions)
-
-        # Get target Q-values for next state
-        # Sample actions from policy for next state
-        with torch.no_grad():
-            # Get actions from model for next observation
-            next_obs_dict = {}
-            for k, v in next_observations.items():
-                if "image" in k.lower() or "state" in k.lower():
-                    next_obs_dict[k] = v
-
-            # Add task descriptions if available
-            if "task_descriptions" in next_observations:
-                next_obs_dict["task_descriptions"] = next_observations["task_descriptions"]
-            elif "prompt" in next_observations:
-                next_obs_dict["task_descriptions"] = next_observations["prompt"]
-
-            # Sample actions from model for next state
-            next_actions, _ = self.model.predict_action_batch(
-                env_obs=next_obs_dict,
-                mode="train",
-                compute_values=False,
-                return_obs=False,
-            )
-            next_actions = torch.from_numpy(next_actions).to(self.device)
-
-            # Handle action shape
-            if len(next_actions.shape) == 3:
-                next_actions = next_actions[:, 0, :]  # [B, action_dim]
-
-            # Get target Q-values
-            q1_target, q2_target = self._get_q_values(next_observations, next_actions)
-            q_target = torch.min(q1_target, q2_target)
-
-            # Compute TD target: r + γ * (1-done) * Q(s', a')
-            td_target = rewards + discount * masks * q_target.squeeze(-1)
-
-        # Q-loss: MSE(Q(s,a), td_target)
-        q1_loss = F.mse_loss(q1_vals.squeeze(-1), td_target)
-        q2_loss = F.mse_loss(q2_vals.squeeze(-1), td_target)
-        q_loss = q1_loss + q2_loss
-
-        # === POLICY LOSS (Actor) ===
-        # Sample new actions from current policy
-        obs_dict = {}
-        for k, v in observations.items():
-            if "image" in k.lower() or "state" in k.lower():
-                obs_dict[k] = v
-
-        if "task_descriptions" in observations:
-            obs_dict["task_descriptions"] = observations["task_descriptions"]
-        elif "prompt" in observations:
-            obs_dict["task_descriptions"] = observations["prompt"]
-
-        # Get actions from model
-        policy_actions, _ = self.model.predict_action_batch(
-            env_obs=obs_dict,
-            mode="train",
-            compute_values=False,
-            return_obs=False,
+        return self.model.compute_training_loss(
+            batch=batch,
+            config=self.config,
+            device=self.device,
         )
-        policy_actions = torch.from_numpy(policy_actions).to(self.device)
-
-        if len(policy_actions.shape) == 3:
-            policy_actions = policy_actions[:, 0, :]  # [B, action_dim]
-
-        # Get Q-values for policy actions
-        q1_policy, q2_policy = self._get_q_values(observations, policy_actions)
-        q_policy = torch.min(q1_policy, q2_policy)
-
-        # Policy loss: -Q(s, a_policy) (standard SAC policy loss)
-        policy_loss = -q_policy.mean()
-
-        # === ALPHA LOSS (Entropy Temperature) ===
-        # Use entropy from policy distribution - approximate with action variance
-        # Since we don't have direct log_probs here, use a simpler alpha loss
-        alpha_loss = -self.log_alpha.exp() * (policy_loss.detach() + self.target_entropy)
-        alpha_loss = alpha_loss.mean()
-
-        # === TOTAL LOSS ===
-        # For training, we only update model (policy) parameters
-        # Q-networks are updated separately in update()
-        total_loss = policy_loss + alpha_loss
-
-        # === INFO DICT ===
-        alpha = self.log_alpha.exp().detach()
-        info = {
-            "q1_loss": q1_loss.item(),
-            "q2_loss": q2_loss.item(),
-            "policy_loss": policy_loss.item(),
-            "alpha_loss": alpha_loss.item(),
-            "alpha": alpha.item(),
-            "q1_mean": q1_vals.mean().item(),
-            "q2_mean": q2_vals.mean().item(),
-            "q_target_mean": q_target.mean().item(),
-            "td_target_mean": td_target.mean().item(),
-        }
-
-        return total_loss, info
 
     def update(
         self,
         batch: dict[str, torch.Tensor],
-        networks_to_update: frozenset[str] = frozenset({"model", "q", "alpha"}),
+        networks_to_update: frozenset[str] = frozenset({"model"}),
     ) -> dict:
         """
         Update agent parameters using gradient descent.
@@ -338,9 +238,6 @@ class PI05Agent:
         Args:
             batch: Dictionary containing batch of transitions
             networks_to_update: Set of network components to update
-                - "model": Flow matching policy (actor)
-                - "q": Twin Q-networks (critic)
-                - "alpha": Entropy temperature
 
         Returns:
             Dictionary of training statistics
@@ -354,82 +251,18 @@ class PI05Agent:
 
         info = {}
 
-        # Update Q-networks (Critic)
-        if "q" in networks_to_update:
-            self.q_optimizer.zero_grad()
-
-            observations = batch["observations"]
-            next_observations = batch["next_observations"]
-            actions = batch["actions"]
-            rewards = batch["rewards"]
-            masks = batch["masks"]
-            discount = self.config.get("discount", 0.97)
-
-            # Get current Q-values
-            q1_vals, q2_vals = self._get_q_values(observations, actions)
-
-            # Get target Q-values for next state
-            with torch.no_grad():
-                # Sample actions from model for next state
-                next_obs_dict = {}
-                for k, v in next_observations.items():
-                    if "image" in k.lower() or "state" in k.lower():
-                        next_obs_dict[k] = v
-
-                if "task_descriptions" in next_observations:
-                    next_obs_dict["task_descriptions"] = next_observations["task_descriptions"]
-                elif "prompt" in next_observations:
-                    next_obs_dict["task_descriptions"] = next_observations["prompt"]
-
-                next_actions, _ = self.model.predict_action_batch(
-                    env_obs=next_obs_dict,
-                    mode="train",
-                    compute_values=False,
-                    return_obs=False,
-                )
-                next_actions = torch.from_numpy(next_actions).to(self.device)
-
-                if len(next_actions.shape) == 3:
-                    next_actions = next_actions[:, 0, :]
-
-                q1_target, q2_target = self._get_q_values(next_observations, next_actions)
-                q_target = torch.min(q1_target, q2_target)
-                td_target = rewards + discount * masks * q_target.squeeze(-1)
-
-            # Q-loss
-            q1_loss = F.mse_loss(q1_vals.squeeze(-1), td_target)
-            q2_loss = F.mse_loss(q2_vals.squeeze(-1), td_target)
-            q_loss = q1_loss + q2_loss
-
-            q_loss.backward()
-            self.q_optimizer.step()
-
-            # Update target networks
-            self._update_target_networks()
-
-            info["q1_loss"] = q1_loss.item()
-            info["q2_loss"] = q2_loss.item()
-            info["q_loss"] = q_loss.item()
-
-        # Update model (Policy)
+        # Update model
         if "model" in networks_to_update:
             self.model_optimizer.zero_grad()
 
             with autocast(self.device):
-                loss, loss_info = self.model_loss_fn(batch)
+                loss, loss_info = self.policy_loss(batch=batch)
 
             self.scaler.scale(loss).backward()
             self.scaler.step(self.model_optimizer)
             self.scaler.update()
 
             info.update(loss_info)
-
-        # Update alpha (Temperature)
-        if "alpha" in networks_to_update:
-            # Alpha is already updated in model_loss_fn via the combined loss
-            # But we should also do a separate update for the log_alpha parameter
-            alpha = self.log_alpha.exp().detach()
-            info["alpha"] = alpha.item()
 
         return info
 
@@ -504,6 +337,7 @@ class PI05Agent:
         augmentation_function: Callable | None = None,
         model_lr: float = 3e-4,
         discount: float = 0.97,
+        use_sac_model: bool = False,
         device: str = "cuda",
         seed: int = 42,
         **kwargs,
@@ -530,12 +364,25 @@ class PI05Agent:
         """
         torch.manual_seed(seed)
         # 先写死一份config
-        cfg: DictConfig = OmegaConf.load("serl_launcher/serl_launcher_torch/agents/continuous/model_configs/pi0_5.yaml")
+        config_path = Path(__file__).resolve().parent / "model_configs" / "pi0_5.yaml"
+        cfg: DictConfig = OmegaConf.load(str(config_path))
         cfg.model_path = ""
-        cfg.add_value_head = True
+        cfg.add_value_head = add_value_head
         cfg.openpi.value_after_vlm = True
+        cfg.openpi.action_chunk = action_chunk
+        cfg.openpi.action_env_dim = action_env_dim
+        cfg.openpi.num_steps = num_steps
+        cfg.openpi.noise_method = noise_method
+        cfg.openpi.noise_level = noise_level
+        cfg.openpi.add_value_head = add_value_head
+        cfg.openpi.train_expert_only = train_expert_only
+        cfg.openpi.joint_logprob = kwargs.get("joint_logprob", False)
+        cfg.openpi.ignore_last = kwargs.get("ignore_last", False)
 
-        model = get_model(cfg)
+        if use_sac_model:
+            model = get_sac_model(cfg)
+        else:
+            model = get_model(cfg)
         # model = OpenPi0ForRLActionPrediction(config)
 
         # Setup transforms if available
@@ -551,60 +398,6 @@ class PI05Agent:
             lr=model_lr,
         )
 
-        # === Create Twin Q-networks for SAC ===
-        # Get observation and action dimensions from config
-        obs_dim = cfg.openpi.vision_encoder.image_size[0] * cfg.openpi.vision_encoder.image_size[1] * 3  # Simplified
-        # Use action_env_dim from parameter
-        action_dim = action_env_dim
-
-        # Q-network takes concatenated obs + action as input
-        q_input_dim = obs_dim + action_dim  # This will be adjusted based on actual obs
-
-        # Create Q-networks with simple MLP
-        q1 = nn.Sequential(
-            nn.Linear(q_input_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1),
-        ).to(device)
-
-        q2 = nn.Sequential(
-            nn.Linear(q_input_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1),
-        ).to(device)
-
-        # Target Q-networks (copy weights)
-        q1_target = nn.Sequential(
-            nn.Linear(q_input_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1),
-        ).to(device)
-
-        q2_target = nn.Sequential(
-            nn.Linear(q_input_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1),
-        ).to(device)
-
-        # Copy weights to target networks
-        q1_target.load_state_dict(q1.state_dict())
-        q2_target.load_state_dict(q2.state_dict())
-
-        # Q-network optimizer
-        q_lr = kwargs.get("q_lr", 3e-4)
-        q_optimizer = torch.optim.Adam(
-            list(q1.parameters()) + list(q2.parameters()),
-            lr=q_lr,
-        )
-
         # Build config dict for agent
         agent_config = {
             "discount": discount,
@@ -615,6 +408,7 @@ class PI05Agent:
             "noise_level": noise_level,
             "add_value_head": add_value_head,
             "train_expert_only": train_expert_only,
+            "use_sac_model": use_sac_model,
             "augmentation_function": augmentation_function,
             "value_coef": kwargs.get("value_coef", 1.0),
             "joint_logprob": kwargs.get("joint_logprob", False),
@@ -626,11 +420,6 @@ class PI05Agent:
         agent = cls(
             model=model,
             model_optimizer=model_optimizer,
-            q1=q1,
-            q2=q2,
-            q1_target=q1_target,
-            q2_target=q2_target,
-            q_optimizer=q_optimizer,
             config=agent_config,
         )
 
