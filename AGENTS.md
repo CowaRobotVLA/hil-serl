@@ -20,16 +20,16 @@ This file provides context for agentic coding agents operating in this repositor
 ```bash
 # Run all tests
 cd serl_launcher
-python -m pytest tests/ -v
+../.venv/bin/python -m pytest tests/ -v
 
 # Run specific test file
-python -m pytest tests/test_pi05_agent.py -v
+../.venv/bin/python -m pytest tests/test_pi05_agent.py -v
 
 # Run single test function
-python -m pytest tests/test_pi05_agent.py::TestPI05AgentCreation::test_create_agent_default_config -v
+../.venv/bin/python -m pytest tests/test_pi05_agent.py::TestPI05AgentCreation::test_create_agent_default_config -v
 
 # Run tests with coverage
-python -m pytest tests/ -v --cov=serl_launcher_torch --cov-report=term-missing
+../.venv/bin/python -m pytest tests/ -v --cov=serl_launcher_torch --cov-report=term-missing
 ```
 
 ### Installation
@@ -268,7 +268,7 @@ def sample_actions(self, observations, mode="eval"):
 
 ## Known Issues & Caveats
 
-1. **PI05Agent Value Loss**: Uses current state's values for TD target (should use next state)
+1. **OpenPI value-head loss**: The non-SAC path still bootstraps with the current state's value target and should be revised to use next-state targets or PPO-style returns.
 2. **load_state_dict**: Does not restore callable config objects (e.g., `augmentation_function`)
 3. **global_step**: Must manually update `config["global_step"]` for noise annealing
 4. **Flow Matching Inference**: Multi-step denoising is computationally expensive
@@ -279,5 +279,6 @@ def sample_actions(self, observations, mode="eval"):
 
 - Agent implementations: `serl_launcher/serl_launcher_torch/agents/continuous/`
 - VLA model: `serl_launcher/serl_launcher_torch/networks/RLinf_plug/openpi/openpi_action_model.py`
+- SAC VLA model: `serl_launcher/serl_launcher_torch/networks/RLinf_plug/openpi/openpi_action_sac_model.py`
 - Robot environment: `serl_robot_infra/robot_env/envs/cowa_arm_env.py`
 - Test example: `serl_launcher/tests/test_pi05_agent.py`
